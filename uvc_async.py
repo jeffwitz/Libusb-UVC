@@ -166,29 +166,29 @@ class UVCPacketStream:
 
         LOG.info("Stopping async stream - cancelling %d transfers", len(self._transfers))
         self._active = False
-        self._resubmit_queue.put(None)
 
-        cancelled = 0
+        with contextlib.suppress(queue.Full):
+            self._resubmit_queue.put_nowait(None)
+
+        cancelled_count = 0
         for transfer, _ in self._transfers:
             try:
                 if transfer.isSubmitted():
                     LOG.debug("Cancelling transfer #%s", transfer.getUserData())
                     transfer.cancel()
-                    cancelled += 1
+                    cancelled_count += 1
             except usb1.USBError as exc:
                 LOG.warning("Error cancelling transfer #%s: %s", transfer.getUserData(), exc)
 
-        if cancelled:
-            LOG.info("Cancelled %d transfers; draining callbacks", cancelled)
-            for _ in range(5):
-                try:
-                    self._ctx.handleEventsTimeout(100000)  # 100 ms
-                except usb1.USBError:
-                    break
-            time.sleep(0.1)
+        if cancelled_count > 0:
+            LOG.info("Cancelled %d transfers. Allowing a moment for cleanup.", cancelled_count)
+            # A short, non-blocking sleep is safer than a blocking event loop here,
+            # as it prevents deadlocks if other threads are also interacting with libusb.
+            time.sleep(0.2)
 
         self._transfers.clear()
-        LOG.info("Async stream stopped")
+        LOG.info("Async stream stop sequence initiated.")
+
 
     def _on_transfer(self, transfer: usb1.USBTransfer) -> None:
         transfer_id = transfer.getUserData()
