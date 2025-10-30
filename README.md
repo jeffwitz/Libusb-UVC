@@ -1,6 +1,6 @@
-# Lightweight UVC Toolkit with PyUSB & libusb1
+# Libusb-UVC : Lightweight UVC Toolkit with PyUSB & libusb1
 
-This repository provides a toolkit for inspecting and streaming from UVC (USB Video Class) cameras using PyUSB and `libusb1`. The core logic has been aligned with the Linux kernel's `uvcvideo` driver to ensure compatibility with complex cameras that require a strict negotiation sequence.
+Libusb-UVC is a toolkit for inspecting and streaming from UVC (USB Video Class) cameras using PyUSB and `libusb1`. The core logic has been aligned with the Linux kernel's `uvcvideo` driver to ensure compatibility with complex cameras that require a strict negotiation sequence.
 
 The streaming stack (PROBE/COMMIT, alternate setting selection, and isochronous transfers) is managed on a single `libusb1` handle, providing stable, high-bandwidth video streams. The toolkit has been successfully tested with devices like the ELP6USB4KCAM01H-CF.
 
