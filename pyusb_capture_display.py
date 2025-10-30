@@ -22,6 +22,8 @@ LOG = logging.getLogger(__name__)
 
 from uvc_usb import (
     UVCCamera,
+    FrameAssemblyResult,
+    UVCPacketAssembler,
     find_uvc_devices,
     list_streaming_interfaces,
     resolve_stream_preference,
@@ -164,82 +166,42 @@ def capture_frame_async(
         frame_event = False
         captured_frame: Optional[bytes] = None
 
-        frame_bytes = bytearray()
-        frame_error = False
-        current_fid: Optional[int] = None
+        assembler = UVCPacketAssembler(expected_size=expected_size)
 
-        def finalize_frame(reason: str) -> None:
-            nonlocal frames_to_skip, frame_event, captured_frame, frame_error, current_fid
-            if current_fid is None:
+        def handle_result(result: FrameAssemblyResult) -> None:
+            nonlocal frames_to_skip, frame_event, captured_frame
+            LOG.debug(
+                "Finalized frame reason=%s size=%s expected=%s error=%s",
+                result.reason,
+                result.size,
+                result.expected_size,
+                result.error,
+            )
+            if not result.complete:
                 return
-            if not frame_error and len(frame_bytes) == expected_size:
-                if frames_to_skip > 0:
-                    frames_to_skip -= 1
-                    LOG.debug(
-                        "Skipping frame (reason=%s) size=%s remaining=%s",
-                        reason,
-                        len(frame_bytes),
-                        frames_to_skip,
-                    )
-                else:
-                    captured_frame = bytes(frame_bytes)
-                    frame_event = True
-                    LOG.debug(
-                        "Captured frame (reason=%s) size=%s",
-                        reason,
-                        len(frame_bytes),
-                    )
-            else:
+            if frames_to_skip > 0:
+                frames_to_skip -= 1
                 LOG.debug(
-                    "Dropping frame (reason=%s) error=%s size=%s",
-                    reason,
-                    frame_error,
-                    len(frame_bytes),
+                    "Skipping frame (reason=%s) size=%s remaining=%s",
+                    result.reason,
+                    result.size,
+                    frames_to_skip,
                 )
-            frame_bytes.clear()
-            frame_error = False
-            current_fid = None
+                return
+            captured_frame = result.payload
+            frame_event = True
+            LOG.debug(
+                "Captured frame (reason=%s) size=%s",
+                result.reason,
+                result.size,
+            )
 
         def on_packet(packet: bytes) -> None:
-            nonlocal current_fid, frame_error
             if not packet:
                 return
 
-            header_len = packet[0]
-            if header_len < 2 or header_len > len(packet):
-                frame_error = True
-                LOG.debug(
-                    "Invalid header length %s for packet size %s",
-                    header_len,
-                    len(packet),
-                )
-                return
-
-            flags = packet[1]
-            payload = packet[header_len:]
-
-            fid = flags & 0x01
-            eof = bool(flags & 0x02)
-            err = bool(flags & 0x40)
-
-            if err:
-                frame_error = True
-
-            if current_fid is None:
-                current_fid = fid
-                frame_bytes.clear()
-                frame_error = bool(err)
-            elif fid != current_fid:
-                finalize_frame("fid-toggle")
-                current_fid = fid
-
-            if payload:
-                frame_bytes.extend(payload)
-            if len(frame_bytes) > expected_size:
-                frame_error = True
-
-            if eof:
-                finalize_frame("eof")
+            for result in assembler.submit(packet):
+                handle_result(result)
 
         camera.start_async_stream(
             on_packet,
@@ -253,7 +215,9 @@ def capture_frame_async(
             while not frame_event and time.time() < deadline:
                 camera.poll_async_events(0.01)
             if not frame_event:
-                finalize_frame("timeout")
+                result = assembler.flush("timeout")
+                if result is not None:
+                    handle_result(result)
             if not frame_event:
                 return None
             return captured_frame

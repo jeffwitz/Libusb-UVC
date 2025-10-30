@@ -285,6 +285,138 @@ class CapturedFrame:
     pts: Optional[int]
 
 
+@dataclasses.dataclass
+class FrameAssemblyResult:
+    """Result produced by :class:`UVCPacketAssembler` when finalising a frame."""
+
+    payload: Optional[bytes]
+    fid: Optional[int]
+    pts: Optional[int]
+    reason: str
+    error: bool
+    size: int
+    expected_size: Optional[int]
+
+    @property
+    def complete(self) -> bool:
+        """Return ``True`` when the frame payload is usable."""
+
+        return not self.error and self.payload is not None
+
+
+class UVCPacketAssembler:
+    """Incrementally assemble UVC payloads from bulk/isochronous packets."""
+
+    def __init__(
+        self,
+        *,
+        expected_size: Optional[int],
+        require_exact_size: bool = True,
+    ) -> None:
+        self._expected_size = expected_size
+        self._require_exact_size = require_exact_size
+        self._frame_bytes = bytearray()
+        self._current_fid: Optional[int] = None
+        self._frame_error = False
+        self._frame_pts: Optional[int] = None
+
+    def submit(self, packet: bytes) -> List[FrameAssemblyResult]:
+        """Process ``packet`` and return any completed frames."""
+
+        results: List[FrameAssemblyResult] = []
+
+        if not packet:
+            return results
+
+        header_len = packet[0]
+        if header_len < 2 or header_len > len(packet):
+            self._frame_error = True
+            LOG.debug("Invalid header length %s for packet size %s", header_len, len(packet))
+            return results
+
+        flags = packet[1]
+        payload = packet[header_len:]
+        fid = flags & BH_FID
+        eof = bool(flags & BH_EOF)
+        err = bool(flags & BH_ERR)
+        pts = None
+        if flags & BH_PTS and header_len >= 6:
+            pts = int.from_bytes(packet[2:6], "little")
+
+        if err:
+            self._frame_error = True
+
+        if self._current_fid is None:
+            self._start_new_frame(fid=fid, pts=pts, error=err)
+        elif fid != self._current_fid:
+            result = self._finalize("fid-toggle")
+            if result is not None:
+                results.append(result)
+            self._start_new_frame(fid=fid, pts=pts, error=err)
+        elif pts is not None:
+            self._frame_pts = pts
+
+        if payload:
+            self._frame_bytes.extend(payload)
+        if (
+            self._expected_size is not None
+            and len(self._frame_bytes) > self._expected_size
+        ):
+            self._frame_error = True
+
+        if eof:
+            result = self._finalize("eof")
+            if result is not None:
+                results.append(result)
+
+        return results
+
+    def flush(self, reason: str) -> Optional[FrameAssemblyResult]:
+        """Force completion of the current frame with ``reason``."""
+
+        return self._finalize(reason)
+
+    def _start_new_frame(self, *, fid: int, pts: Optional[int], error: bool) -> None:
+        self._current_fid = fid
+        self._frame_bytes.clear()
+        self._frame_error = bool(error)
+        self._frame_pts = pts
+
+    def _finalize(self, reason: str) -> Optional[FrameAssemblyResult]:
+        if self._current_fid is None:
+            return None
+
+        expected = self._expected_size
+        size = len(self._frame_bytes)
+
+        if expected is None:
+            size_ok = size > 0
+        elif self._require_exact_size:
+            size_ok = size == expected
+        else:
+            size_ok = size <= expected
+
+        error = self._frame_error or not size_ok
+        payload = None if error else bytes(self._frame_bytes)
+
+        result = FrameAssemblyResult(
+            payload=payload,
+            fid=self._current_fid,
+            pts=self._frame_pts,
+            reason=reason,
+            error=error,
+            size=size,
+            expected_size=expected,
+        )
+
+        self._frame_bytes.clear()
+        self._frame_error = False
+        self._current_fid = None
+        self._frame_pts = None
+
+        return result
+
+
 def find_uvc_devices(vid: Optional[int] = None, pid: Optional[int] = None) -> List[usb.core.Device]:
     """Return every USB device that looks like a UVC camera."""
 
