@@ -22,3 +22,9 @@ dist/
 # Test
 test_*.txt
 
+#Images on the disk
+*.tiff
+*.tif
+*.jpg
+*.jpeg
+
