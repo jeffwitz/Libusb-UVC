@@ -18,10 +18,10 @@ from uvc_usb import (
     UVCCamera,
     MJPEGPreviewPipeline,
     CodecPreference,
+    UVCPacketAssembler,
     find_uvc_devices,
     list_streaming_interfaces,
     resolve_stream_preference,
-    select_format_and_frame,
     decode_to_rgb,
     describe_device,
     UVCError,
@@ -133,9 +133,7 @@ def main() -> int:
     is_mjpeg = stream_format.description.upper() in {"MJPEG", "MJPG"}
     expected_size = None if is_mjpeg else (frame.max_frame_size or (frame.width * frame.height * 2))
 
-    frame_bytes = bytearray()
-    frame_error = False
-    current_fid: Optional[int] = None
+    assembler = UVCPacketAssembler(expected_size=expected_size)
     frames_to_skip = max(0, args.skip_frames)
     latest_frame: Optional[bytes] = None
     latest_ts = 0.0
@@ -143,78 +141,30 @@ def main() -> int:
     frame_lock = threading.Lock()
     running = True
 
-    def finalize_frame(reason: str) -> None:
-        nonlocal frames_to_skip, frame_bytes, frame_error, current_fid, latest_frame, latest_ts
-        if current_fid is None:
-            return
-        LOG.debug(
-            "Finalizing frame reason=%s size=%s expected=%s error=%s",
-            reason,
-            len(frame_bytes),
-            expected_size,
-            frame_error,
-        )
-
-        size_ok = (
-            not frame_error
-            and ((expected_size is None and len(frame_bytes) > 0) or (expected_size is not None and len(frame_bytes) == expected_size))
-        )
-        if size_ok:
-            if frames_to_skip > 0:
-                frames_to_skip -= 1
-                LOG.debug("Skipping frame (reason=%s) remaining=%s", reason, frames_to_skip)
-            else:
-                with frame_lock:
-                    latest_frame = bytes(frame_bytes)
-                    latest_ts = time.time()
-                frame_event.set()
-                LOG.debug("Accepted frame (reason=%s) size=%s", reason, len(frame_bytes))
-        else:
-            LOG.debug(
-                "Dropping frame (reason=%s) error=%s size=%s",
-                reason,
-                frame_error,
-                len(frame_bytes),
-            )
-        frame_bytes.clear()
-        frame_error = False
-        current_fid = None
-
     def on_packet(packet: bytes) -> None:
-        nonlocal current_fid, frame_error, frame_bytes, running
+        nonlocal frames_to_skip, latest_frame, latest_ts, running
         if not running or not packet:
             return
 
-        header_len = packet[0]
-        if header_len < 2 or header_len > len(packet):
-            frame_error = True
-            LOG.debug("Invalid header length %s for packet size %s", header_len, len(packet))
-            return
-
-        flags = packet[1]
-        payload = packet[header_len:]
-        fid = flags & 0x01
-        eof = bool(flags & 0x02)
-        err = bool(flags & 0x40)
-
-        if err:
-            frame_error = True
-
-        if current_fid is None:
-            current_fid = fid
-            frame_bytes.clear()
-            frame_error = bool(err)
-        elif fid != current_fid:
-            finalize_frame("fid-toggle")
-            current_fid = fid
-
-        if payload:
-            frame_bytes.extend(payload)
-        if expected_size is not None and len(frame_bytes) > expected_size:
-            frame_error = True
-
-        if eof:
-            finalize_frame("eof")
+        for result in assembler.submit(packet):
+            LOG.debug(
+                "Finalized frame reason=%s size=%s expected=%s error=%s",
+                result.reason,
+                result.size,
+                result.expected_size,
+                result.error,
+            )
+            if not result.complete:
+                continue
+            if frames_to_skip > 0:
+                frames_to_skip -= 1
+                LOG.debug("Skipping frame (reason=%s) remaining=%s", result.reason, frames_to_skip)
+                continue
+            with frame_lock:
+                latest_frame = result.payload
+                latest_ts = time.time()
+            frame_event.set()
+            LOG.debug("Accepted frame (reason=%s) size=%s", result.reason, result.size)
 
     frames_displayed = 0
     fps_epoch_start = time.time()
