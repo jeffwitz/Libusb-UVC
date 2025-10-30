@@ -1,0 +1,8 @@
+# Allow non-root access to the HP 5MP UVC camera used in this project.
+# Copy this file to /etc/udev/rules.d/ and reload udev rules:
+#   sudo cp 99-hp-5mp-camera.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload-rules && sudo udevadm trigger
+# To be adapted with lsusb change ATTR{idVendor} and ATTR{idProduct}=="5473"
+# with the id of your product
+SUBSYSTEM=="usb", ATTR{idVendor}=="0408", ATTR{idProduct}=="5473", \
+    MODE="0660", GROUP="plugdev", TAG+="uaccess"
