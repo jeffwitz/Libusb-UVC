@@ -98,10 +98,13 @@ class CodecPreference(str):
     YUYV = "yuyv"
     MJPEG = "mjpeg"
 
+# --- UVC Constants ---
 UVC_CLASS = 0x0E
+VC_SUBCLASS = 0x01
 VS_SUBCLASS = 0x02
 CS_INTERFACE = 0x24
 
+# Video Control (VC) descriptor subtypes
 VC_HEADER = 0x01
 VC_INPUT_TERMINAL = 0x02
 VC_OUTPUT_TERMINAL = 0x03
@@ -109,8 +112,16 @@ VC_SELECTOR_UNIT = 0x04
 VC_PROCESSING_UNIT = 0x05
 VC_EXTENSION_UNIT = 0x06
 
-VC_POWER_MODE_CONTROL = 0x01
+# Video Streaming (VS) descriptor subtypes
+VS_INPUT_HEADER = 0x01
+VS_FORMAT_UNCOMPRESSED = 0x04
+VS_FRAME_UNCOMPRESSED = 0x05
+VS_FORMAT_MJPEG = 0x06
+VS_FRAME_MJPEG = 0x07
+VS_FORMAT_FRAME_BASED = 0x10
+VS_FRAME_FRAME_BASED = 0x11
 
+# UVC Payload Header constants
 BH_FID = 0x01
 BH_EOF = 0x02
 BH_PTS = 0x04
@@ -120,24 +131,47 @@ BH_STI = 0x20
 BH_ERR = 0x40
 BH_EOH = 0x80
 
-# VideoStreaming descriptor subtypes (UVC 1.5 specification §3.9)
-VS_INPUT_HEADER = 0x01
-VS_FORMAT_UNCOMPRESSED = 0x04
-VS_FRAME_UNCOMPRESSED = 0x05
-VS_FORMAT_MJPEG = 0x06
-VS_FRAME_MJPEG = 0x07
-VS_FORMAT_FRAME_BASED = 0x10
-VS_FRAME_FRAME_BASED = 0x11
+# UVC Request Codes for control transfers
+SET_CUR = 0x01
+GET_CUR = 0x81
+GET_MIN = 0x82
+GET_MAX = 0x83
+GET_RES = 0x84
+GET_LEN = 0x85
+GET_INFO = 0x86
+GET_DEF = 0x87
 
 # VideoStreaming control selectors
 VS_PROBE_CONTROL = 0x01
 VS_COMMIT_CONTROL = 0x02
 
-# USB class-specific requests
-SET_CUR = 0x01
-GET_CUR = 0x81
-GET_LEN = 0x85
-GET_DEF = 0x87
+# Standard UVC Control Selectors
+# (Incomplete list, add more as needed)
+# Camera Terminal (CT) Controls
+CT_EXPOSURE_TIME_ABSOLUTE_CONTROL = 0x04
+CT_ZOOM_ABSOLUTE_CONTROL = 0x0B
+
+# Processing Unit (PU) Controls
+PU_BRIGHTNESS_CONTROL = 0x02
+PU_CONTRAST_CONTROL = 0x03
+PU_GAIN_CONTROL = 0x04
+PU_WHITE_BALANCE_TEMPERATURE_CONTROL = 0x0A
+PU_WHITE_BALANCE_TEMPERATURE_AUTO_CONTROL = 0x0B
+
+UVC_CONTROL_MAPPING = {
+    "Camera Terminal": {
+        4: "Exposure Time, Absolute",
+        11: "Zoom, Absolute",
+    },
+    "Processing Unit": {
+        2: "Brightness",
+        3: "Contrast",
+        4: "Gain",
+        10: "White Balance Temperature",
+        11: "White Balance Temperature, Auto",
+    }
+}
+
 
 # Pre-computed request types used for control transfers on interfaces
 REQ_TYPE_IN = usb.util.build_request_type(
@@ -151,6 +185,7 @@ REQ_TYPE_OUT = usb.util.build_request_type(
 class UVCError(RuntimeError):
     """Raised when the camera reports unexpected errors."""
 
+# --- Data Structures for Descriptors ---
 
 @dataclasses.dataclass
 class FrameInfo:
@@ -164,30 +199,16 @@ class FrameInfo:
     max_frame_size: int
 
     def intervals_hz(self) -> List[float]:
-        """Return unique frame rates advertised for this frame."""
-
         unique = sorted({v for v in self.intervals_100ns if v})
         return [_interval_to_hz(v) for v in unique]
 
     def pick_interval(
-        self,
-        target_fps: Optional[float],
-        *,
-        strict: bool = False,
-        tolerance_hz: float = 1e-3,
+        self, target_fps: Optional[float], *, strict: bool = False, tolerance_hz: float = 1e-3
     ) -> int:
-        """Pick the advertised frame interval closest to ``target_fps``.
-
-        ``strict`` forces the chosen interval to match the requested frame rate
-        within ``tolerance_hz``; otherwise the nearest interval is returned.
-        """
-
         if not self.intervals_100ns:
             return self.default_interval
-
         if target_fps is None or target_fps <= 0:
             return self.default_interval or self.intervals_100ns[0]
-
         target_interval = int(round(1e7 / target_fps))
         best = min(self.intervals_100ns, key=lambda value: abs(value - target_interval))
         if strict:
@@ -202,7 +223,6 @@ class FrameInfo:
 @dataclasses.dataclass
 class StreamFormat:
     """A Video Streaming format along with its advertised frames."""
-
     description: str
     format_index: int
     subtype: int
@@ -213,7 +233,6 @@ class StreamFormat:
 @dataclasses.dataclass
 class AltSettingInfo:
     """Information about an alternate streaming interface setting."""
-
     alternate_setting: int
     endpoint_address: Optional[int]
     endpoint_attributes: Optional[int]
@@ -228,7 +247,6 @@ class AltSettingInfo:
 @dataclasses.dataclass
 class StreamingInterface:
     """Grouping of the per-interface formats and alternate settings."""
-
     interface_number: int
     formats: List[StreamFormat] = dataclasses.field(default_factory=list)
     alt_settings: List[AltSettingInfo] = dataclasses.field(default_factory=list)
@@ -240,29 +258,17 @@ class StreamingInterface:
         return None
 
     def select_alt_for_payload(self, required_payload: int) -> Optional[AltSettingInfo]:
-        """Return the first alt whose packet size covers ``required_payload``."""
-
         candidates = [alt for alt in self.alt_settings if alt.max_packet_size]
         if not candidates:
             return None
-
-        # Prefer the smallest alt that satisfies the payload requirement to
-        # avoid monopolising USB bandwidth unnecessarily.
         for alt in sorted(candidates, key=lambda a: a.max_packet_size):
             if alt.max_packet_size >= required_payload:
                 return alt
         return max(candidates, key=lambda a: a.max_packet_size)
 
     def find_frame(
-        self,
-        width: int,
-        height: int,
-        *,
-        format_index: Optional[int] = None,
-        subtype: Optional[int] = None,
+        self, width: int, height: int, *, format_index: Optional[int] = None, subtype: Optional[int] = None
     ) -> Optional[Tuple[StreamFormat, FrameInfo]]:
-        """Return the first (format, frame) matching the requested geometry."""
-
         for fmt in self.formats:
             if format_index is not None and fmt.format_index != format_index:
                 continue
@@ -273,11 +279,30 @@ class StreamingInterface:
                     return fmt, frame
         return None
 
+@dataclasses.dataclass
+class UVCControl:
+    """Represents a discovered UVC control."""
+    unit_id: int
+    selector: int
+    name: str
+    type: str
+
+@dataclasses.dataclass
+class UVCUnit:
+    """Represents a Unit in the Video Control topology."""
+    unit_id: int
+    type: str
+    # --- CORRECTION: a default value here caused the TypeError in the child class ---
+    controls: List[UVCControl]
+
+@dataclasses.dataclass
+class ExtensionUnit(UVCUnit):
+    """Represents an Extension Unit with its specific GUID."""
+    guid: str
 
 @dataclasses.dataclass
 class CapturedFrame:
     """Container returned by :meth:`UVCCamera.read_frame`."""
-
     payload: bytes
     format: StreamFormat
     frame: FrameInfo
@@ -287,7 +312,6 @@ class CapturedFrame:
 
 def find_uvc_devices(vid: Optional[int] = None, pid: Optional[int] = None) -> List[usb.core.Device]:
     """Return every USB device that looks like a UVC camera."""
-
     try:
         devices = usb.core.find(find_all=True)
     except usb.core.NoBackendError:
@@ -304,7 +328,6 @@ def find_uvc_devices(vid: Optional[int] = None, pid: Optional[int] = None) -> Li
             continue
         if pid is not None and dev.idProduct != pid:
             continue
-
         if any(intf.bInterfaceClass == UVC_CLASS for cfg in dev for intf in cfg):
             result.append(dev)
     return result
@@ -312,38 +335,124 @@ def find_uvc_devices(vid: Optional[int] = None, pid: Optional[int] = None) -> Li
 
 def iter_video_streaming_interfaces(dev: usb.core.Device) -> Iterator[usb.core.Interface]:
     """Yield every interface whose class/subclass matches UVC streaming."""
-
     for cfg in dev:
         for intf in cfg:
             if intf.bInterfaceClass == UVC_CLASS and intf.bInterfaceSubClass == VS_SUBCLASS:
                 yield intf
 
 
+def list_control_units(dev: usb.core.Device) -> Dict[int, List[UVCUnit]]:
+    """Build UVCUnit descriptions for all Video Control interfaces on dev."""
+    unit_map: Dict[int, List[UVCUnit]] = {}
+    for cfg in dev:
+        for intf in cfg:
+            if intf.bInterfaceClass == UVC_CLASS and intf.bInterfaceSubClass == VC_SUBCLASS:
+                if intf.bAlternateSetting == 0 and intf.extra_descriptors:
+                    units = parse_vc_descriptors(bytes(intf.extra_descriptors))
+                    if units:
+                        unit_map[intf.bInterfaceNumber] = units
+    return unit_map
+
+def parse_vc_descriptors(extra: bytes) -> List[UVCUnit]:
+    """Parse the raw `extra_descriptors` blob for a VC interface."""
+    units: List[UVCUnit] = []
+    idx = 0
+    while idx + 2 < len(extra):
+        length = extra[idx]
+        if length == 0 or idx + length > len(extra):
+            break
+        dtype = extra[idx + 1]
+        subtype = extra[idx + 2]
+        payload = extra[idx : idx + length]
+
+        if dtype == CS_INTERFACE:
+            unit = None
+            if subtype == VC_INPUT_TERMINAL:
+                unit = _parse_input_terminal(payload)
+            elif subtype == VC_PROCESSING_UNIT:
+                unit = _parse_processing_unit(payload)
+            elif subtype == VC_EXTENSION_UNIT:
+                unit = _parse_extension_unit(payload)
+
+            if unit:
+                units.append(unit)
+        idx += length
+    return units
+
+def _parse_input_terminal(desc: bytes) -> Optional[UVCUnit]:
+    if len(desc) < 8:
+        return None
+    unit_id = desc[3]
+    controls = []
+    if len(desc) >= 18:
+        bitmap = int.from_bytes(desc[15:18], "little")
+        control_map = UVC_CONTROL_MAPPING.get("Camera Terminal", {})
+        for i in range(24):
+            if (bitmap >> i) & 1:
+                control_name = control_map.get(i, f"Unknown Control Selector {i}")
+                controls.append(UVCControl(unit_id=unit_id, selector=i, name=control_name, type="Camera Terminal"))
+    return UVCUnit(unit_id=unit_id, type="Input Terminal", controls=controls)
+
+def _parse_processing_unit(desc: bytes) -> Optional[UVCUnit]:
+    """
+    Parse Processing Unit descriptor robustly:
+    - read bControlSize at offset 7
+    - read bmControls starting at offset 8 for bControlSize bytes
+    """
+    if len(desc) < 10:
+        return NoneA
+    unit_id = desc[3]
+    controls: List[UVCControl] = []
+    # Processing Unit: bControlSize @ offset 7, bmControls start @8
+    bControlSize = desc[7] if len(desc) > 7 else 0
+    ctrl_start = 8
+    ctrl_end = ctrl_start + bControlSize
+    if bControlSize > 0 and ctrl_end <= len(desc):
+        bitmap_bytes = desc[ctrl_start:ctrl_end]
+        bitmap = int.from_bytes(bitmap_bytes, "little")
+        control_map = UVC_CONTROL_MAPPING.get("Processing Unit", {})
+        max_bits = 8 * bControlSize
+        for i in range(max_bits):
+            if (bitmap >> i) & 1:
+                control_name = control_map.get(i, f"Unknown Control Selector {i}")
+                controls.append(
+                    UVCControl(unit_id=unit_id, selector=i, name=control_name, type="Processing Unit")
+                )
+    return UVCUnit(unit_id=unit_id, type="Processing Unit", controls=controls)
+
+
+def _parse_extension_unit(desc: bytes) -> Optional[ExtensionUnit]:
+    """Parse an Extension Unit descriptor to find its GUID."""
+    if len(desc) < 24:
+        return None
+    unit_id = desc[3]
+    guid_bytes = desc[4:20]
+    guid_str = (
+        f"{guid_bytes[3]:02x}{guid_bytes[2]:02x}{guid_bytes[1]:02x}{guid_bytes[0]:02x}-"
+        f"{guid_bytes[5]:02x}{guid_bytes[4]:02x}-"
+        f"{guid_bytes[7]:02x}{guid_bytes[6]:02x}-"
+        f"{guid_bytes[8]:02x}{guid_bytes[9]:02x}-"
+        f"{guid_bytes[10]:02x}{guid_bytes[11]:02x}{guid_bytes[12]:02x}{guid_bytes[13]:02x}{guid_bytes[14]:02x}{guid_bytes[15]:02x}"
+    )
+    return ExtensionUnit(unit_id=unit_id, type="Extension Unit", guid=guid_str, controls=[])
+
+
 def list_streaming_interfaces(dev: usb.core.Device) -> Dict[int, StreamingInterface]:
     """Build :class:`StreamingInterface` descriptions for *dev*."""
-
     interfaces: Dict[int, StreamingInterface] = {}
     for cfg in dev:
         for intf in cfg:
             if intf.bInterfaceClass != UVC_CLASS or intf.bInterfaceSubClass != VS_SUBCLASS:
                 continue
-
             info = interfaces.setdefault(
-                intf.bInterfaceNumber,
-                StreamingInterface(interface_number=intf.bInterfaceNumber),
+                intf.bInterfaceNumber, StreamingInterface(interface_number=intf.bInterfaceNumber)
             )
-
-            # Alternate settings expose the same interface number but with
-            # different endpoint bandwidth.  We record every variant.
-            endpoint_address = None
-            endpoint_attributes = None
-            max_packet_size = 0
+            endpoint_address, endpoint_attributes, max_packet_size = None, None, 0
             if intf.bNumEndpoints:
                 ep = intf[0]
                 endpoint_address = ep.bEndpointAddress
                 endpoint_attributes = ep.bmAttributes
                 max_packet_size = _iso_payload_capacity(ep.wMaxPacketSize)
-
             info.alt_settings.append(
                 AltSettingInfo(
                     alternate_setting=intf.bAlternateSetting,
@@ -352,12 +461,8 @@ def list_streaming_interfaces(dev: usb.core.Device) -> Dict[int, StreamingInterf
                     max_packet_size=max_packet_size,
                 )
             )
-
-            # Alternate settings other than zero rarely duplicate the class-
-            # specific descriptors, so we only parse them once.
             if intf.bAlternateSetting == 0 and intf.extra_descriptors:
                 info.formats = parse_vs_descriptors(bytes(intf.extra_descriptors))
-
     for interface in interfaces.values():
         interface.alt_settings.sort(key=lambda alt: alt.alternate_setting)
     return interfaces
@@ -1090,13 +1195,14 @@ class UVCCamera:
             iso_capacity,
         )
 
-        if fps and frame_bytes and iso_capacity and fps * frame_bytes > iso_capacity:
-            LOG.warning(
-                "Alt setting %s provides %.2f MB/s < required %.2f MB/s; expect truncated frames",
-                alt.alternate_setting,
-                iso_capacity / 1e6,
-                fps * frame_bytes / 1e6,
-            )
+        if stream_format.subtype == VS_FORMAT_UNCOMPRESSED:
+            if fps and frame_bytes and iso_capacity and fps * frame_bytes > iso_capacity:
+                LOG.warning(
+                    "Alt setting %s provides %.2f MB/s < required %.2f MB/s; expect truncated frames",
+                    alt.alternate_setting,
+                    iso_capacity / 1e6,
+                    fps * frame_bytes / 1e6,
+                )
 
         LOG.debug(
             "Configured stream: fmt=%s frame=%s alt=%s payload=%s",
@@ -1305,7 +1411,6 @@ class UVCCamera:
         req_in = usb1.TYPE_CLASS | usb1.RECIPIENT_INTERFACE | usb1.ENDPOINT_IN
         req_out = usb1.TYPE_CLASS | usb1.RECIPIENT_INTERFACE | usb1.ENDPOINT_OUT
 
-        # 1. Get a template buffer from the device (GET_CUR is preferred)
         try:
             template = handle.controlRead(
                 req_in, GET_CUR, VS_PROBE_CONTROL << 8, self.interface_number, length, timeout
@@ -1317,29 +1422,24 @@ class UVCCamera:
 
         buf = bytearray(template)
 
-        # 2. Patch the template with our desired streaming parameters.
-        # Only touch the fields necessary for negotiation.
         interval = self._committed_frame_interval or self._frame.pick_interval(None)
 
-        bm_hint = 1  # dwFrameInterval is valid
+        bm_hint = 1
         buf[0:2] = bm_hint.to_bytes(2, "little")
         buf[2] = self._committed_format_index or self._format.format_index
         buf[3] = self._committed_frame_index or self._frame.frame_index
         buf[4:8] = int(interval or 0).to_bytes(4, "little")
 
-        # 3. PROBE: Send the desired parameters to the device.
         LOG.debug("libusb1 PROBE SET_CUR: %s", bytes(buf).hex())
         handle.controlWrite(
             req_out, SET_CUR, VS_PROBE_CONTROL << 8, self.interface_number, bytes(buf), timeout
         )
 
-        # 4. Read back the negotiated parameters. The device may have adjusted them.
         negotiated = bytes(handle.controlRead(
             req_in, GET_CUR, VS_PROBE_CONTROL << 8, self.interface_number, length, timeout
         ))
         LOG.debug("libusb1 PROBE GET_CUR (negotiated): %s", negotiated.hex())
 
-        # 5. COMMIT: Send the final negotiated parameters back to commit the stream.
         LOG.debug("libusb1 COMMIT SET_CUR: %s", negotiated.hex())
         handle.controlWrite(
             req_out, SET_CUR, VS_COMMIT_CONTROL << 8, self.interface_number, negotiated, timeout
@@ -1381,10 +1481,6 @@ class UVCCamera:
         self._async_ctx = None
         self._control_claimed = False
         LOG.info("Async stream stopped")
-
-    # ------------------------------------------------------------------
-    # Frame capture
-    # ------------------------------------------------------------------
 
     def read_frame(self, timeout_ms: int = 1000) -> CapturedFrame:
         """Read a single video frame from the streaming endpoint."""
@@ -1726,6 +1822,9 @@ __all__ = [
     "FrameInfo",
     "StreamFormat",
     "StreamingInterface",
+    "UVCControl",
+    "UVCUnit",
+    "ExtensionUnit",
     "UVCCamera",
     "UVCError",
     "CodecPreference",
@@ -1733,6 +1832,7 @@ __all__ = [
     "find_uvc_devices",
     "iter_video_streaming_interfaces",
     "list_streaming_interfaces",
+    "list_control_units",
     "parse_vs_descriptors",
     "perform_probe_commit",
     "probe_streaming_interface",
@@ -1744,5 +1844,3 @@ __all__ = [
     "REQ_TYPE_IN",
     "GET_CUR",
 ]
-# VideoControl request selectors
-VC_POWER_MODE_CONTROL = 0x01
