@@ -2002,6 +2002,14 @@ class UVCCamera:
             raise UVCError("Stream not configured; call configure_stream() first")
 
         expected_size = self._frame.max_frame_size if self._frame else None
+        if (
+            self._format is not None
+            and (
+                self._format.subtype == VS_FORMAT_MJPEG
+                or "MJPG" in (self._format.description or "").upper()
+            )
+        ):
+            expected_size = None
         frame_bytes = bytearray()
         current_fid: Optional[int] = None
         err_seen = False
@@ -2048,8 +2056,7 @@ class UVCCamera:
                     self._format is not None
                     and self._frame is not None
                     and not err_seen
-                    and expected_size is not None
-                    and len(frame_bytes) == expected_size
+                    and (expected_size is None or len(frame_bytes) == expected_size)
                 ):
                     return CapturedFrame(
                         payload=bytes(frame_bytes),
