@@ -12,6 +12,7 @@ ENV/
 build/
 dist/
 *.egg-info/
+docs/_build/
 
 # IDE/Editor specific
 .idea/
@@ -27,4 +28,3 @@ test_*.txt
 *.tif
 *.jpg
 *.jpeg
-

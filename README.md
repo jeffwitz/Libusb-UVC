@@ -39,6 +39,15 @@ source .venv/bin/activate
 pip install -e .[full]   # "full" installs OpenCV and Pillow for the examples
 ```
 
+### Documentation
+
+Install the documentation extras and build the Sphinx site locally:
+
+```bash
+pip install -e .[docs]
+sphinx-build -M html docs docs/_build
+```
+
 ### Udev Rule (for non-root access)
 
 To access the camera without `sudo`, copy and adapt the provided udev rule, then reload the system rules.
