@@ -48,6 +48,15 @@ pip install -e .[docs]
 sphinx-build -M html docs docs/_build
 ```
 
+On Debian/Ubuntu you can instead rely on the packaged tooling:
+
+```bash
+sudo apt-get install python3-sphinx python3-sphinx-rtd-theme
+sphinx-build -M html docs docs/_build
+```
+
+The generated HTML will be available at `docs/_build/html/index.html`.
+
 ### Udev Rule (for non-root access)
 
 To access the camera without `sudo`, copy and adapt the provided udev rule, then reload the system rules.
