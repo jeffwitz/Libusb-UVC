@@ -1,0 +1,8 @@
+{
+  "guid": "63610682-5070-49ab-b8cc-b3855e8d221d",
+  "name": "Quanta Proprietary Controls",
+  "controls": {
+    "1": { "name": "Privacy Shutter", "type": "bool" },
+    "2": { "name": "LED Control", "type": "int" }
+  }
+}

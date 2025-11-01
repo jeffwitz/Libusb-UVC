@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "libusb-uvc"
+version = "0.1.0"
+description = "High-level libusb-based helpers for USB Video Class cameras"
+readme = "README.md"
+authors = [{name = "Libusb-UVC Contributors"}]
+license = {text = "MIT"}
+requires-python = ">=3.8"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Topic :: Multimedia :: Video",
+    "Topic :: System :: Hardware :: Hardware Drivers",
+]
+dependencies = [
+    "pyusb>=1.2",
+    "libusb1>=1.9",
+    "numpy>=1.20",
+]
+
+[project.optional-dependencies]
+opencv = ["opencv-python>=4.5"]
+pillow = ["Pillow>=9.0"]
+full = ["opencv-python>=4.5", "Pillow>=9.0"]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+include-package-data = true
+scripts = [
+    "examples/uvc_capture_video.py",
+    "examples/uvc_capture_frame.py",
+    "examples/uvc_display_frame.py",
+    "examples/uvc_inspect.py",
+    "examples/uvc_led_preview.py",
+    "examples/exposure_sweep.py",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"libusb_uvc" = ["quirks/*.json"]

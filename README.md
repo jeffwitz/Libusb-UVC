@@ -6,18 +6,17 @@ This hybrid approach was designed to solve common issues with complex or "quirky
 
 ## Key Features
 
--   **Robust Streaming Core**: Reliably streams from complex cameras that fail with simpler negotiation methods.
--   **High-Performance Async API**: Manages multiple in-flight isochronous transfers for low-latency, high-bandwidth video.
--   **Hybrid USB Backend**: Uses `PyUSB` for easy device enumeration and `libusb1` for performance-critical streaming, getting the best of both worlds.
--   **Comprehensive Tooling**: Includes CLI scripts for listing device capabilities, capturing raw frames, and launching live video previews.
--   **Decoder-Agnostic**: Provides raw frame data (YUYV, MJPEG), ready to be used with libraries like OpenCV, Pillow, or GStreamer.
+- **High-Level Pythonic API**: `UVCCamera.open()` and `UVCCamera.stream()` provide context-managed streaming, frame iterators, and one-line control access (`get_control()` / `set_control()`).
+- **Robust Streaming Core**: Reliably streams from complex cameras that fail with simpler negotiation methods.
+- **Graceful Kernel Integration**: libusb captures are followed by an automatic USB reset so `/dev/video*` nodes and `uvcvideo` are restored immediately.
+- **Comprehensive Tooling**: Includes CLI scripts for listing device capabilities, grabbing single frames, and launching live previews.
+- **Decoder-Agnostic**: Provides raw frame data (YUYV, MJPEG), ready to be used with libraries like OpenCV, Pillow, or GStreamer.
 
 ## Core Components
 
--   `uvc_usb.py`: The main module with high-level helpers and the `UVCCamera` class.
--   `uvc_async.py`: A lightweight wrapper around `libusb1`'s asynchronous transfer API.
--   **Example Scripts**: `pyusb_uvc_info.py`, `pyusb_capture_frame.py`, and `pyusb_capture_video.py` demonstrate the library's capabilities.
--   `udev/`: Contains an example udev rule for granting non-root access to USB devices.
+- `libusb_uvc` (under `src/`): the Python package containing the high-level API and asynchronous backend.
+- `examples/`: ready-to-run demonstrations and utilities (`uvc_capture_video.py`, `uvc_capture_frame.py`, `uvc_display_frame.py`, `uvc_inspect.py`, `uvc_led_preview.py`, `exposure_sweep.py`).
+- `udev/`: an example udev rule for granting non-root access to USB devices.
 
 ## 1. Setup
 
@@ -32,15 +31,12 @@ For the MJPEG live preview, you will also need GStreamer packages:
 
 ### Python Environment
 
-All Python dependencies are listed in `requirements.txt`.
+Use the provided `pyproject.toml` to install the library (and optionally the example scripts) in editable mode:
 
 ```bash
-# Create and activate a virtual environment
 python3 -m venv .venv
 source .venv/bin/activate
-
-# Install dependencies
-pip install -r requirements.txt
+pip install -e .[full]   # "full" installs OpenCV and Pillow for the examples
 ```
 
 ### Udev Rule (for non-root access)
@@ -60,51 +56,67 @@ Unplug and replug the camera to apply the new permissions. Ensure your user is a
 
 ## 2. Usage
 
-### List Available Formats
-
-List all streaming modes for a specific camera.
+### List available formats & controls
 
 ```bash
-python3 pyusb_uvc_info.py --vid 0x0408 --pid 0x5473
+python3 examples/uvc_inspect.py --vid 0x0408 --pid 0x5473 --verbose
 ```
-Add flags like `--probe-interface`, `--probe-format`, and `--commit` to test a specific stream configuration.
 
-### Capture a Single Raw Frame
+The script uses the new `UVCControlsManager` to print validated controls (including quirk names such as *LED Control*) and can still run probe/commit tests with `--probe-interface`, `--probe-format`, `--commit`, etc.
 
-Capture a single frame and save its raw payload to a file. The script defaults to YUYV but can be configured for MJPEG.
+### Capture a single frame
 
 ```bash
-python3 pyusb_capture_frame.py \
+python3 examples/uvc_capture_frame.py \
     --vid 0x0408 --pid 0x5473 \
-    --width 640 --height 480 --fps 30 \
-    --output frame.raw
+    --width 1920 --height 1080 --fps 30 \
+    --codec mjpeg \
+    --output frame.jpg
 ```
 
-### Live Video Preview (OpenCV / GStreamer)
+The script relies on `UVCCamera.stream()` to grab one frame, automatically converts MJPEG/YUYV when possible, and resets the device when it exits so `/dev/video*` remains usable.
 
-This script provides a real-time video preview using the asynchronous streaming API.
+### Live video preview (OpenCV)
 
-**For YUYV streams (lower resolutions):**
-An OpenCV window will display the decoded video feed.
 ```bash
-python3 pyusb_capture_video.py \
-    --vid 0x0408 --pid 0x5473 \
-    --width 640 --height 480 \
-    --fps 15 --codec yuyv
-```
-
-**For MJPEG streams (higher resolutions):**
-The script pipes the JPEG frames to a GStreamer pipeline for efficient hardware-accelerated decoding.
-```bash
-python3 pyusb_capture_video.py \
+python3 examples/uvc_capture_video.py \
     --vid 0x0408 --pid 0x5473 \
     --width 1920 --height 1080 \
-    --fps 30 --codec mjpeg
+    --fps 30 --codec mjpeg \
+    --duration 10   # optional, auto-stop after N seconds
 ```
-Press `q` or `ESC` in the preview window to exit. Use `--log-level DEBUG` for detailed packet-level information.
+
+`UVCCamera.stream()` feeds a frame iterator; pressing `q`/`ESC` still stops the preview. The device is reset on exit, so a subsequent `mplayer tv:// -tv driver=v4l2:device=/dev/video0` continues to work without unplugging the camera.
+
+For a scripted example that also toggles the LED after a delay, see `examples/uvc_led_preview.py`.
+
+To play with manual exposure, try `examples/exposure_sweep.py`, which disables auto exposure and sweeps `Exposure Time, Absolute` from its minimum to maximum over 300 frames while overlaying the current value on the preview window.
+
+### Minimal Python example
+
+```python
+from libusb_uvc import UVCCamera, CodecPreference  # or: from uvc_usb import ... (legacy shim)
+
+with UVCCamera.open(vid=0x0408, pid=0x5473, interface=1) as cam:
+    original_exposure = cam.get_control("Exposure Time, Absolute")
+    cam.set_control("Exposure Time, Absolute", 200)
+
+    with cam.stream(width=640, height=480, codec=CodecPreference.MJPEG, duration=5) as frames:
+        for frame in frames:
+            rgb = frame.to_rgb()
+            # ... process numpy array ...
+            break
+
+    if original_exposure is not None:
+        cam.set_control("Exposure Time, Absolute", original_exposure)
+```
+
+The stream iterator handles all PROBE/COMMIT steps, asynchronous transfers, and frame reassembly for you.
 
 ## 3. Troubleshooting
 
--   **Permission Denied:** Ensure your udev rule is correctly installed, has the right VID/PID, and that your user is in the `plugdev` group.
--   **No Frames Received (Empty Transfers):** This usually indicates a negotiation failure. Run `pyusb_uvc_info.py` with `--probe...` flags and `--log-level DEBUG` to inspect the PROBE/COMMIT sequence.
--   **Frame Drops / Corrupted Video:** This can be a USB bandwidth issue. Try a lower resolution, a lower `--fps`, or connect the camera to a different USB port (preferably a direct port on the motherboard).
+- **Permission Denied:** Ensure your udev rule is correctly installed, has the right VID/PID, and that your user is in the `plugdev` group.
+- **Negotiation failures:** Run `examples/uvc_inspect.py` with `--probe...` flags and `--log-level DEBUG` to inspect the PROBE/COMMIT sequence.
+- **Frame Drops / Corrupted Video:** This can be a USB bandwidth issue. Try a lower resolution, a lower `--fps`, or connect the camera to a different USB port (preferably a direct port on the motherboard).
+- **V4L2 missing after capture:** The library now issues `device.reset()` when a libusb stream stops. If you disabled this behaviour, call `camera.stop_streaming()` or `camera.reset_device()` before returning control to V4L2 applications.
+- **Useful extras:** Install `[opencv]`, `[pillow]`, or `[full]` extras if you want MJPEG previews, Matplotlib demos, or frame conversions out of the box.
