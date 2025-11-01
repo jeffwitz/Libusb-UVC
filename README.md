@@ -113,11 +113,32 @@ To play with manual exposure, try `examples/exposure_sweep.py`, which disables a
 ### Minimal Python example
 
 ```python
-from libusb_uvc import UVCCamera, CodecPreference  # or: from uvc_usb import ... (legacy shim)
+import usb.core
+
+from libusb_uvc import UVCCamera, CodecPreference, UVCError  # or: from uvc_usb import ... (legacy shim)
 
 with UVCCamera.open(vid=0x0408, pid=0x5473, interface=1) as cam:
+    controls = {ctrl.name: ctrl for ctrl in cam.enumerate_controls(refresh=True)}
+
+    auto_mode = controls.get("Auto Exposure Mode")
+    if auto_mode and auto_mode.is_writable():
+        try:
+            cam.set_control(auto_mode, 1)  # Manual mode
+        except (UVCError, usb.core.USBError):
+            pass
+
+    auto_priority = controls.get("Auto Exposure Priority")
+    if auto_priority and auto_priority.is_writable():
+        try:
+            cam.set_control(auto_priority, 0)
+        except (UVCError, usb.core.USBError):
+            pass
+
     original_exposure = cam.get_control("Exposure Time, Absolute")
-    cam.set_control("Exposure Time, Absolute", 200)
+    try:
+        cam.set_control("Exposure Time, Absolute", 200)
+    except (UVCError, usb.core.USBError):
+        pass
 
     with cam.stream(width=640, height=480, codec=CodecPreference.MJPEG, duration=5) as frames:
         for frame in frames:
@@ -126,7 +147,10 @@ with UVCCamera.open(vid=0x0408, pid=0x5473, interface=1) as cam:
             break
 
     if original_exposure is not None:
-        cam.set_control("Exposure Time, Absolute", original_exposure)
+        try:
+            cam.set_control("Exposure Time, Absolute", original_exposure)
+        except (UVCError, usb.core.USBError):
+            pass
 ```
 
 The stream iterator handles all PROBE/COMMIT steps, asynchronous transfers, and frame reassembly for you.
