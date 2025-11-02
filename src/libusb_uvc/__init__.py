@@ -14,6 +14,7 @@ import dataclasses
 import errno
 import json
 import logging
+import os
 import pathlib
 import queue
 import threading
@@ -41,9 +42,23 @@ LOG = logging.getLogger(__name__)
 __all__: List[str]
 __version__ = "0.1.0"
 
+_AUTO_DETACH_VC = os.environ.get("LIBUSB_UVC_AUTO_DETACH_VC", "1").strip().lower() not in {
+    "0",
+    "false",
+    "no",
+    "off",
+}
+
+if not _AUTO_DETACH_VC:
+    LOG.debug("Auto-detach of VC interfaces disabled via LIBUSB_UVC_AUTO_DETACH_VC")
+
 
 _LIBUSB_HOTPLUG_DISABLED = False
 _LIBUSB_HOTPLUG_ATTEMPTED = False
+
+
+def _auto_detach_vc_enabled() -> bool:
+    return _AUTO_DETACH_VC
 
 
 def load_quirks() -> Dict[str, dict]:
@@ -460,13 +475,23 @@ def list_control_units(dev: usb.core.Device) -> Dict[int, List[UVCUnit]]:
         for intf in cfg:
             if intf.bInterfaceClass == UVC_CLASS and intf.bInterfaceSubClass == VC_SUBCLASS:
                 reattach = False
-                try:
-                    if dev.is_kernel_driver_active(intf.bInterfaceNumber):
-                        dev.detach_kernel_driver(intf.bInterfaceNumber)
-                        LOG.info("Detached kernel driver from VC interface %s", intf.bInterfaceNumber)
-                        reattach = True
-                except (usb.core.USBError, NotImplementedError, AttributeError):
-                    reattach = False
+                should_detach = _auto_detach_vc_enabled()
+                if should_detach:
+                    try:
+                        if dev.is_kernel_driver_active(intf.bInterfaceNumber):
+                            dev.detach_kernel_driver(intf.bInterfaceNumber)
+                            LOG.info(
+                                "Detached kernel driver from VC interface %s",
+                                intf.bInterfaceNumber,
+                            )
+                            reattach = True
+                    except (usb.core.USBError, NotImplementedError, AttributeError):
+                        reattach = False
+                else:
+                    LOG.debug(
+                        "Auto-detach disabled; reading VC interface %s without detaching kernel driver",
+                        intf.bInterfaceNumber,
+                    )
                 try:
                     if intf.bAlternateSetting == 0 and intf.extra_descriptors:
                         units = parse_vc_descriptors(bytes(intf.extra_descriptors))
@@ -2569,21 +2594,43 @@ def _vc_w_value(selector: int) -> int:
 
 
 @contextlib.contextmanager
-def claim_vc_interface(dev: usb.core.Device, vc_if: int, *, auto_reattach: bool = True):
+def claim_vc_interface(
+    dev: usb.core.Device,
+    vc_if: int,
+    *,
+    auto_reattach: bool = True,
+    auto_detach: Optional[bool] = None,
+):
     """Detach only the VC interface from the kernel, claim it, then release and reattach."""
     reattach = False
+    detach = _auto_detach_vc_enabled() if auto_detach is None else bool(auto_detach)
+
     try:
         dev.set_configuration()
     except usb.core.USBError:
         pass
-    try:
-        if dev.is_kernel_driver_active(vc_if):
-            dev.detach_kernel_driver(vc_if)
-            reattach = True
-    except (usb.core.USBError, NotImplementedError, AttributeError):
-        pass
 
-    usb.util.claim_interface(dev, vc_if)
+    if detach:
+        try:
+            if dev.is_kernel_driver_active(vc_if):
+                dev.detach_kernel_driver(vc_if)
+                reattach = True
+        except (usb.core.USBError, NotImplementedError, AttributeError):
+            pass
+    else:
+        LOG.debug(
+            "Auto-detach disabled; attempting to claim VC interface %s without detaching kernel driver",
+            vc_if,
+        )
+
+    try:
+        usb.util.claim_interface(dev, vc_if)
+    except usb.core.USBError as exc:
+        if not detach and getattr(exc, "errno", None) in {errno.EBUSY, errno.EPERM}:
+            raise usb.core.USBError(
+                "Unable to claim VC interface while LIBUSB_UVC_AUTO_DETACH_VC=0 and kernel driver is active"
+            ) from exc
+        raise
     try:
         yield
     finally:

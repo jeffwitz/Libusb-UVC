@@ -51,6 +51,13 @@ Disable auto exposure, then linearly sweep ``Exposure Time, Absolute`` across
 its supported range while overlaying the current value on the preview. The
 example demonstrates how to update controls without resetting the stream.
 
+``uvc_generate_quirk.py``
+-------------------------
+
+Inspect Extension Unit (XU) selectors and write a JSON skeleton that can be
+added to ``src/libusb_uvc/quirks``. Use ``--single`` together with ``--output``
+to save a ready-to-edit file for the target GUID.
+
 Integrating Scripts
 -------------------
 
@@ -58,4 +65,3 @@ Each script relies on :class:`libusb_uvc.UVCCamera` for interface claiming and
 stream lifecycle management. Use them as references when building your own
 applications, or import their helper functions directly if you need to iterate
 quickly.
-

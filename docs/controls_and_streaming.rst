@@ -18,6 +18,10 @@ The :class:`libusb_uvc.UVCControlsManager` validates controls using the UVC
 Controls that respond positively are exposed to higher layers via
 :class:`libusb_uvc.ControlEntry`.
 
+For convenience Libusb-UVC temporarily detaches the VC interface from the
+kernel driver while querying controls. Set the environment variable
+``LIBUSB_UVC_AUTO_DETACH_VC=0`` if you prefer to handle detaching manually.
+
 Extension Units and Quirks
 --------------------------
 
@@ -64,4 +68,3 @@ Further Reading
 
 - :doc:`howto/index` contains practical recipes for control management.
 - :doc:`api` documents every data structure and helper function.
-

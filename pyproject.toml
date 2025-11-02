@@ -37,6 +37,7 @@ include-package-data = true
     "examples/uvc_display_frame.py",
     "examples/uvc_inspect.py",
     "examples/uvc_led_preview.py",
+    "examples/uvc_generate_quirk.py",
     "examples/exposure_sweep.py",
 ]
 

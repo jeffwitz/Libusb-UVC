@@ -55,6 +55,17 @@ unit selectors under ``src/libusb_uvc/quirks``. The manager merges quirk names,
 ``GET_INFO`` responses, and descriptor metadata to present human-readable
 control names.
 
+VC Interface Busy
+-----------------
+
+**Symptom:** Attempting to read/write controls raises ``[Errno 16] Resource busy``.
+
+**Resolution:** The library normally detaches the Video Control (VC) interface
+from ``uvcvideo`` on demand. If you set the environment variable
+``LIBUSB_UVC_AUTO_DETACH_VC=0`` you must detach the kernel driver manually (or
+run as root). Re-enable auto-detach by unsetting the variable or giving it a
+truthy value.
+
 Further Help
 ------------
 
@@ -62,4 +73,3 @@ Further Help
 - Review the :doc:`api` reference for lower-level helper functions.
 - File issues with detailed logs and ``uvc_inspect`` output when encountering
   device-specific quirks not covered here.
-

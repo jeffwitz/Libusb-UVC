@@ -15,7 +15,7 @@ This hybrid approach was designed to solve common issues with complex or "quirky
 ## Core Components
 
 - `libusb_uvc` (under `src/`): the Python package containing the high-level API and asynchronous backend.
-- `examples/`: ready-to-run demonstrations and utilities (`uvc_capture_video.py`, `uvc_capture_frame.py`, `uvc_display_frame.py`, `uvc_inspect.py`, `uvc_led_preview.py`, `exposure_sweep.py`).
+- `examples/`: ready-to-run demonstrations and utilities (`uvc_capture_video.py`, `uvc_capture_frame.py`, `uvc_display_frame.py`, `uvc_inspect.py`, `uvc_led_preview.py`, `uvc_generate_quirk.py`, `exposure_sweep.py`).
 - `udev/`: an example udev rule for granting non-root access to USB devices.
 
 ## 1. Setup
@@ -110,6 +110,16 @@ For a scripted example that also toggles the LED after a delay, see `examples/uv
 
 To play with manual exposure, try `examples/exposure_sweep.py`, which disables auto exposure and sweeps `Exposure Time, Absolute` from its minimum to maximum over 300 frames while overlaying the current value on the preview window.
 
+### Generate a quirks skeleton
+
+```bash
+python3 examples/uvc_generate_quirk.py \
+    --vid 0x0408 --pid 0x5473 \
+    --single --output quirk.json
+```
+
+The script inspects Extension Unit selectors and writes a ready-to-edit JSON file that can be dropped into `src/libusb_uvc/quirks/`.
+
 ### Minimal Python example
 
 ```python
@@ -161,4 +171,5 @@ The stream iterator handles all PROBE/COMMIT steps, asynchronous transfers, and 
 - **Negotiation failures:** Run `examples/uvc_inspect.py` with `--probe...` flags and `--log-level DEBUG` to inspect the PROBE/COMMIT sequence.
 - **Frame Drops / Corrupted Video:** This can be a USB bandwidth issue. Try a lower resolution, a lower `--fps`, or connect the camera to a different USB port (preferably a direct port on the motherboard).
 - **V4L2 missing after capture:** The library now issues `device.reset()` when a libusb stream stops. If you disabled this behaviour, call `camera.stop_streaming()` or `camera.reset_device()` before returning control to V4L2 applications.
+- **VC auto-detach:** By default the VC interface is temporarily detached so user-space control transfers work even when `uvcvideo` is active. Set `LIBUSB_UVC_AUTO_DETACH_VC=0` to disable this and handle detaching yourself.
 - **Useful extras:** Install `[opencv]`, `[pillow]`, or `[full]` extras if you want MJPEG previews, Matplotlib demos, or frame conversions out of the box.
