@@ -193,6 +193,7 @@ VS_FORMAT_UNCOMPRESSED_STILL = 0x30
 VS_FRAME_UNCOMPRESSED_STILL = 0x31
 VS_FORMAT_MJPEG_STILL = 0x32
 VS_FRAME_MJPEG_STILL = 0x33
+VS_STILL_IMAGE_FRAME_DESCRIPTOR = 0x03
 
 # UVC Payload Header constants
 BH_FID = 0x01
@@ -298,6 +299,17 @@ class FrameInfo:
         """Return True when the frame advertises still-image support."""
 
         return bool(self.bm_capabilities & 0x01)
+
+
+@dataclasses.dataclass
+class StillFrameInfo:
+    """Still image frame descriptor (Method 2)."""
+
+    width: int
+    height: int
+    endpoint_address: int
+    compression_indices: List[int] = dataclasses.field(default_factory=list)
+    format_subtype: Optional[int] = None
     def pick_interval(
         self, target_fps: Optional[float], *, strict: bool = False, tolerance_hz: float = 1e-3
     ) -> int:
@@ -324,6 +336,7 @@ class StreamFormat:
     subtype: int
     guid: bytes
     frames: List[FrameInfo] = dataclasses.field(default_factory=list)
+    still_frames: List["StillFrameInfo"] = dataclasses.field(default_factory=list)
 
 
 @dataclasses.dataclass
@@ -732,6 +745,8 @@ def parse_vs_descriptors(extra: bytes) -> List[StreamFormat]:
                 frame = _parse_frame_descriptor(payload)
                 if frame:
                     current_format.frames.append(frame)
+            elif subtype == VS_STILL_IMAGE_FRAME_DESCRIPTOR and current_format:
+                current_format.still_frames.extend(_parse_still_frame_descriptor(payload))
 
         idx += length
 
@@ -799,6 +814,42 @@ def _parse_frame_descriptor(desc: bytes) -> Optional[FrameInfo]:
         max_frame_size=max_frame_size,
         bm_capabilities=bm_capabilities,
     )
+
+
+def _parse_still_frame_descriptor(desc: bytes) -> List[StillFrameInfo]:
+    if len(desc) < 5:
+        return []
+
+    endpoint = desc[3]
+    num_sizes = desc[4]
+    offset = 5
+    frames: List[StillFrameInfo] = []
+
+    for _ in range(num_sizes):
+        if offset + 4 > len(desc):
+            break
+        width = int.from_bytes(desc[offset : offset + 2], "little")
+        height = int.from_bytes(desc[offset + 2 : offset + 4], "little")
+        frames.append(StillFrameInfo(width=width, height=height, endpoint_address=endpoint))
+        offset += 4
+
+    if offset >= len(desc):
+        return frames
+
+    num_compression = desc[offset]
+    offset += 1
+    compressions: List[int] = []
+    for _ in range(num_compression):
+        if offset >= len(desc):
+            break
+        compressions.append(int(desc[offset]))
+        offset += 1
+
+    if compressions:
+        for frame in frames:
+            frame.compression_indices = list(compressions)
+
+    return frames
 
 
 def describe_device(dev: usb.core.Device) -> str:
