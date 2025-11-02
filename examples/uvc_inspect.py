@@ -79,7 +79,7 @@ def _fetch_control_value(
                 length_hint,
                 timeout=500,
             )
-    except usb.core.USBError:
+    except (usb.core.USBError, RuntimeError):
         return None
     return bytes(data) if data is not None else None
 
@@ -103,9 +103,13 @@ def print_controls(dev: usb.core.Device) -> None:
 
     for interface_number, units in units_map.items():
         print(f"  Interface {interface_number}:")
-        with claim_vc_interface(dev, interface_number):
-            manager = UVCControlsManager(dev, units, interface_number=interface_number)
-            controls = manager.get_controls()
+        try:
+            with claim_vc_interface(dev, interface_number):
+                manager = UVCControlsManager(dev, units, interface_number=interface_number)
+                controls = manager.get_controls()
+        except RuntimeError as exc:
+            print(f"    Unable to claim VC interface {interface_number}: {exc}")
+            continue
         if not controls:
             print("    (No validated controls)")
             continue
