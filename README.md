@@ -167,6 +167,22 @@ The helper lists every validated control (including Microsoft XU names when
 available) and captures a few raw infrared frames, saving PNG conversions when
 Pillow is installed.
 
+### Capture a still image
+
+```bash
+python3 examples/uvc_capture_still.py \
+    --vid 0x0408 --pid 0x5473 \
+    --interface 1 \
+    --output still.tiff
+```
+
+Still-image negotiation relies on the UVC ``VS_STILL_*`` controls.  Many
+firmwares expose the selectors but respond only to a subset of formats or expect
+vendor-specific values, so be prêt à expérimenter (ou capturer les trames USB)
+si votre matériel ignore le déclencheur.  Lorsqu'une image brute est renvoyée,
+le script la stocke en TIFF pour éviter toute compression et conserver la
+profondeur de bits maximale.
+
 ### Microsoft Camera Control XU
 
 Libusb-UVC ships a baseline descriptor for the Microsoft Camera Control
@@ -226,7 +242,7 @@ The stream iterator handles all PROBE/COMMIT steps, asynchronous transfers, and 
 ## Roadmap / To Do
 
 - **Compressed payload support (H.264/H.265/AV1/VP8):** today the library focuses on uncompressed and MJPEG streams; adding decoders and payload negotiation for the modern compressed formats will require parsing their specific payload headers and, in many cases, reverse engineering device behaviour.
-- **UVC still image capture:** the still-image trigger/control path defined by the UVC specification is not yet exposed; implementing it involves wiring the Still Image Capture Method, associated endpoints, and control/state transitions.
+- **UVC still image capture:** initial Method 1 support is available, but broader hardware coverage (compression indices, multi-sensor setups, error handling) still requires work and reverse engineering.
 - **Control coverage & vendor quirks:** even when a control is advertised (for example an IR torch selector), firmwares often expect vendor-specific messages. Mapping them reliably demands per-device investigation or reverse engineering before they can become first-class features in the toolkit.
 
 ## 3. Troubleshooting

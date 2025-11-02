@@ -52,6 +52,16 @@ validated control (using Microsoft XU hints when available) and captures a
 handful of IR frames, saving raw payloads alongside optional PNG conversions.
 Use ``--interface`` to select the IR streaming interface number.
 
+``uvc_capture_still.py``
+------------------------
+
+Negotiate the UVC still-image controls and trigger a single capture.  Support
+depends heavily on the firmware: even when the still selectors are exposed,
+devices often expect vendor-specific compression indices or control sequences.
+Use this script as a starting point for experimentation and be ready to gather
+USB traces if your hardware ignores the trigger.  The helper stores
+uncompressed payloads as TIFF to avoid precision loss.
+
 ``uvc_ir_torch_demo.py``
 ------------------------
 
@@ -88,9 +98,9 @@ Future Work
 - **Compressed payload codecs (H.264/H.265/AV1/VP8)**: support is not yet
   implemented; handling those streams would require parsing their specific UVC
   payload headers and integrating suitable decoders.
-- **UVC still-image capture**: the still-image trigger and transfer flow remains
-  on the roadmap; implementing it means wiring the dedicated controls and
-  endpoints defined by the specification.
+- **UVC still-image capture**: basic Method 1 support exists, but additional
+  work is needed to cover device-specific compression indices, multiple
+  sensors, and error handling.
 - **Vendor-specific controls**: even when a selector is advertised, many
   firmwares only respond to proprietary messages.  Completing those features
   demands reverse engineering or documentation from the manufacturer.
