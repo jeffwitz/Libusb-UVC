@@ -2626,11 +2626,16 @@ def claim_vc_interface(
     try:
         usb.util.claim_interface(dev, vc_if)
     except usb.core.USBError as exc:
-        if not detach and getattr(exc, "errno", None) in {errno.EBUSY, errno.EPERM}:
-            raise usb.core.USBError(
-                "Unable to claim VC interface while LIBUSB_UVC_AUTO_DETACH_VC=0 and kernel driver is active"
-            ) from exc
-        raise
+        if detach or getattr(exc, "errno", None) not in {errno.EBUSY, errno.EPERM}:
+            raise
+        LOG.warning(
+            "Failed to claim VC interface %s while LIBUSB_UVC_AUTO_DETACH_VC=0: %s",
+            vc_if,
+            exc,
+        )
+        raise RuntimeError(
+            "VC interface is busy. Detach the kernel driver or enable auto-detach."
+        ) from exc
     try:
         yield
     finally:
