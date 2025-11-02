@@ -1,0 +1,84 @@
+{
+  "schema_version": 1,
+  "guid": "0f3f95dc-2632-4c4e-92c9-a04782f43bc8",
+  "name": "Microsoft Camera Control Extension Unit",
+  "controls": [
+    {
+      "key": "focus_extended",
+      "name": "Focus (Extended)",
+      "get_info_expect": { "D4": 0 },
+      "payload": { "min_len": 32 },
+      "notes": "Microsoft UVC 1.5 extended focus control (section 2.2.2.2)."
+    },
+    {
+      "key": "exposure_extended",
+      "name": "Exposure (Extended)",
+      "get_info_expect": { "D4": 0 },
+      "payload": { "min_len": 32 },
+      "notes": "Microsoft UVC 1.5 extended exposure control (section 2.2.2.3)."
+    },
+    {
+      "key": "ev_compensation",
+      "name": "Exposure Compensation (EV)",
+      "get_info_expect": { "D4": 1 },
+      "payload": { "min_len": 32 },
+      "notes": "EV compensation control with asynchronous updates (section 2.2.2.4)."
+    },
+    {
+      "key": "white_balance_extended",
+      "name": "White Balance (Extended)",
+      "get_info_expect": { "D4": 1 },
+      "payload": { "min_len": 32 },
+      "notes": "Extended white balance control supporting value format (section 2.2.2.5)."
+    },
+    {
+      "key": "face_authentication",
+      "name": "Face Authentication",
+      "get_info_expect": { "D4": 1 },
+      "payload": { "min_len": 8 },
+      "notes": "Face authentication enablement control (section 2.2.2.6)."
+    },
+    {
+      "key": "intrinsics",
+      "name": "Camera Intrinsics",
+      "get_info_expect": { "D4": 0 },
+      "payload": { "min_len": 64 },
+      "notes": "Returns calibration data per endpoint (section 2.2.2.8)."
+    },
+    {
+      "key": "metadata_control",
+      "name": "Metadata Control",
+      "get_info_expect": { "D4": 0 },
+      "payload": { "min_len": 24 },
+      "notes": "Maps to KSPROPERTY_CAMERACONTROL_EXTENDED_METADATA (section 2.2.2.9)."
+    },
+    {
+      "key": "ir_torch",
+      "name": "IR Torch",
+      "get_info_expect": { "D4": 0 },
+      "payload": { "min_len": 32 },
+      "notes": "Controls IR illumination state and intensity (section 2.2.2.10)."
+    },
+    {
+      "key": "digital_window",
+      "name": "Digital Window / FOV",
+      "get_info_expect": { "D4": 0 },
+      "payload": { "min_len": 48 },
+      "notes": "Configures the digital window and field-of-view (section 2.2.2.11)."
+    },
+    {
+      "key": "video_hdr",
+      "name": "Video HDR Mode",
+      "get_info_expect": { "value": 3 },
+      "payload": { "fixed_len": 16 },
+      "notes": "Video HDR power mode control (section 2.2.2.13)."
+    },
+    {
+      "key": "framerate_throttling",
+      "name": "Frame Rate Throttling",
+      "get_info_expect": { "value": 3 },
+      "payload": { "min_len": 16 },
+      "notes": "Frame rate throttling control, valid while streaming (section 2.2.2.14)."
+    }
+  ]
+}

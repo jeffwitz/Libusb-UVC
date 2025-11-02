@@ -32,6 +32,17 @@ control definitions. The helper :func:`libusb_uvc.load_quirks` aggregates these
 files at runtime, enabling cameras like the Quanta 5 MP series to present
 controls such as ``Privacy Shutter`` and ``LED Control``.
 
+Libusb-UVC also understands the Microsoft Camera Control XU
+(``0f3f95dc-2632-4c4e-92c9-a04782f43bc8``).  The bundled quirk file provides a
+heuristic description of each selector using the ``GET_INFO`` flags and payload
+lengths returned by the device.  When a match is found the resulting
+:class:`libusb_uvc.ControlEntry` exposes readable names (``Video HDR Mode``,
+``Metadata Control``, etc.) and preserves the underlying quirk metadata in the
+``metadata`` attribute so applications can inspect the original Microsoft
+property key.  If your camera exposes the Microsoft XU with a different
+ordering, copy the JSON file, assign explicit selector numbers, and place it in
+your own package.
+
 Streaming Interfaces
 --------------------
 

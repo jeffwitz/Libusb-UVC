@@ -425,6 +425,7 @@ class ControlEntry:
     raw_maximum: Optional[bytes] = None
     raw_step: Optional[bytes] = None
     raw_default: Optional[bytes] = None
+    metadata: Dict[str, object] = dataclasses.field(default_factory=dict)
 
     def is_writable(self) -> bool:
         return bool(self.info & 0x02)
@@ -2720,6 +2721,149 @@ class UVCControlsManager:
             max_unsigned = int.from_bytes(max_raw, "little", signed=False)
             return min_unsigned > max_unsigned
 
+        def _payload_length(length: int, min_raw: Optional[bytes], default_raw: Optional[bytes]) -> Optional[int]:
+            if length:
+                return length
+            if default_raw:
+                return len(default_raw)
+            if min_raw:
+                return len(min_raw)
+            return None
+
+        def _match_get_info(info_value: int, definition: dict) -> Optional[int]:
+            if definition is None:
+                return 0
+            score = 0
+
+            expected_info = definition.get("expected_info")
+            if expected_info is not None:
+                if isinstance(expected_info, (list, tuple, set)):
+                    values = {int(v) for v in expected_info}
+                    if info_value not in values:
+                        return None
+                else:
+                    if info_value != int(expected_info):
+                        return None
+                score += 2
+
+            info_expect = definition.get("get_info_expect")
+            if info_expect is not None:
+                if isinstance(info_expect, dict):
+                    value = info_expect.get("value")
+                    if value is not None and info_value != int(value):
+                        return None
+                    if value is not None:
+                        score += 2
+                    for key, bit_value in info_expect.items():
+                        if key == "value":
+                            continue
+                        key_str = str(key).upper()
+                        if key_str.startswith("D") and key_str[1:].isdigit():
+                            bit_index = int(key_str[1:])
+                            if bit_index < 0 or bit_index > 7:
+                                continue
+                            expected_bit = 1 if int(bit_value) else 0
+                            if ((info_value >> bit_index) & 0x01) != expected_bit:
+                                return None
+                            score += 1
+                else:
+                    try:
+                        expected_value = int(info_expect)
+                    except (TypeError, ValueError):
+                        expected_value = None
+                    if expected_value is not None:
+                        if info_value != expected_value:
+                            return None
+                        score += 2
+            return score
+
+        def _match_length(payload_len: Optional[int], definition: dict) -> Optional[int]:
+            if payload_len is None or definition is None:
+                return 0
+
+            expected = definition.get("expected_length")
+            payload_spec = definition.get("payload")
+            score = 0
+
+            if expected is None and isinstance(payload_spec, dict):
+                expected = payload_spec.get("fixed_len")
+                if expected is None:
+                    expected = payload_spec.get("expected_length")
+
+            allowed_lengths: Optional[set] = None
+            if expected is not None:
+                if isinstance(expected, (list, tuple, set)):
+                    allowed_lengths = {int(v) for v in expected}
+                else:
+                    allowed_lengths = {int(expected)}
+
+            if allowed_lengths is not None:
+                if payload_len not in allowed_lengths:
+                    return None
+                score += 2
+
+            if isinstance(payload_spec, dict):
+                min_len = payload_spec.get("min_len")
+                max_len = payload_spec.get("max_len")
+                if min_len is not None and payload_len < int(min_len):
+                    return None
+                if max_len is not None and payload_len > int(max_len):
+                    return None
+                if min_len is not None or max_len is not None:
+                    score += 1
+            return score
+
+        def _consume_definition(
+            definitions: List[dict],
+            *,
+            selector: int,
+            info_value: int,
+            payload_len: Optional[int],
+            min_raw: Optional[bytes],
+            max_raw: Optional[bytes],
+            step_raw: Optional[bytes],
+            default_raw: Optional[bytes],
+        ) -> Optional[dict]:
+            best_def = None
+            best_score = -1
+
+            for definition in definitions:
+                if not isinstance(definition, dict):
+                    continue
+                if definition.get("_used"):
+                    continue
+
+                score = 0
+                expected_selector = definition.get("selector")
+                if expected_selector is not None:
+                    try:
+                        if int(expected_selector) != selector:
+                            continue
+                        score += 5
+                    except (TypeError, ValueError):
+                        continue
+
+                info_score = _match_get_info(info_value, definition)
+                if info_score is None:
+                    continue
+                score += info_score
+
+                length_score = _match_length(payload_len, definition)
+                if length_score is None:
+                    continue
+                score += length_score
+
+                if score <= 0:
+                    continue
+
+                if score > best_score:
+                    best_score = score
+                    best_def = definition
+
+            if best_def is not None:
+                best_def["_used"] = True
+            return best_def
+
         for unit in self._units:
             controls = getattr(unit, "controls", []) or []
             if not controls:
@@ -2727,14 +2871,22 @@ class UVCControlsManager:
 
             guid = ""
             quirk_map: Dict[str, dict] = {}
+            quirk_definitions: List[dict] = []
             if isinstance(unit, ExtensionUnit):
                 guid = unit.guid.lower()
                 quirk_entry = self._quirks.get(guid, {})
-                quirk_controls = quirk_entry.get("controls", {}) if isinstance(quirk_entry, dict) else {}
-                if isinstance(quirk_controls, dict):
-                    quirk_map = {str(k): v for k, v in quirk_controls.items()}
+                if isinstance(quirk_entry, dict):
+                    quirk_controls = quirk_entry.get("controls", {})
+                    if isinstance(quirk_controls, dict):
+                        quirk_map = {str(k): v for k, v in quirk_controls.items()}
+                    elif isinstance(quirk_controls, list):
+                        for item in quirk_controls:
+                            if isinstance(item, dict):
+                                # Shallow copy so we can mark entries as used during matching.
+                                quirk_definitions.append(dict(item))
 
             for control in controls:
+                control_type = control.type
                 info = vc_ctrl_get(
                     self._device,
                     self._interface,
@@ -2781,23 +2933,54 @@ class UVCControlsManager:
                     GET_DEF,
                     length_hint,
                 )
+                payload_len = _payload_length(length, min_raw, default_raw)
 
                 signed = _should_use_signed(min_raw, max_raw)
 
                 name = control.name
+                metadata: Dict[str, object] = {}
+
                 if quirk_map:
                     override = quirk_map.get(str(control.selector))
                     if isinstance(override, dict):
                         override_name = override.get("name")
                         if override_name:
                             name = override_name
+                        metadata = {k: v for k, v in override.items() if k != "name"}
+                elif quirk_definitions:
+                    matched = _consume_definition(
+                        quirk_definitions,
+                        selector=control.selector,
+                        info_value=info[0],
+                        payload_len=payload_len,
+                        min_raw=min_raw,
+                        max_raw=max_raw,
+                        step_raw=step_raw,
+                        default_raw=default_raw,
+                    )
+                    if matched:
+                        override_name = matched.get("name")
+                        if override_name:
+                            name = override_name
+                        override_type = matched.get("type")
+                        if override_type:
+                            control_type = str(override_type)
+                        metadata = {
+                            k: v
+                            for k, v in matched.items()
+                            if not k.startswith("_") and k != "name"
+                        }
+
+                metadata.setdefault("info_byte", info[0])
+                if payload_len is not None and "payload_length" not in metadata:
+                    metadata["payload_length"] = payload_len
 
                 entry = ControlEntry(
                     interface_number=self._interface,
                     unit_id=control.unit_id,
                     selector=control.selector,
                     name=name,
-                    type=control.type,
+                    type=control_type,
                     info=info[0],
                     minimum=_bytes_to_int(min_raw, signed=signed),
                     maximum=_bytes_to_int(max_raw, signed=signed),
@@ -2808,6 +2991,7 @@ class UVCControlsManager:
                     raw_maximum=max_raw,
                     raw_step=step_raw,
                     raw_default=default_raw,
+                    metadata=metadata,
                 )
                 self._controls.append(entry)
 

@@ -132,6 +132,17 @@ python3 examples/uvc_generate_quirk.py \
 
 The script inspects Extension Unit selectors and writes a ready-to-edit JSON file that can be dropped into `src/libusb_uvc/quirks/`.
 
+### Microsoft Camera Control XU
+
+Libusb-UVC ships a baseline descriptor for the Microsoft Camera Control
+Extension Unit (GUID `0f3f95dc-2632-4c4e-92c9-a04782f43bc8`).  When a camera
+implements this XU, the library heuristically matches the selectors to their
+extended properties (HDR mode, metadata switch, IR torch, etc.) so that
+`uvc_inspect.py` and the high-level API expose readable control names.  The
+heuristics rely on `GET_INFO` flags and payload sizes; if your device uses a
+different ordering you can copy the bundled JSON and fill the `selector`
+fields explicitly for a VID/PID-specific quirk.
+
 ### Minimal Python example
 
 ```python
