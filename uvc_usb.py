@@ -2500,6 +2500,26 @@ def gray16_to_rgb(payload: bytes, width: int, height: int):
     return np.repeat(gray8[:, :, None], 3, axis=2)
 
 
+def _trim_mjpeg_payload(payload: bytes) -> bytes:
+    """Return payload truncated at the JPEG EOI marker if trailing garbage is present."""
+
+    if not payload:
+        return payload
+    eoi = payload.rfind(b"\xff\xd9")
+    if eoi == -1:
+        return payload
+    if eoi + 2 == len(payload):
+        return payload
+    trimmed = payload[: eoi + 2]
+    LOG.debug(
+        "Trimming MJPEG payload from %s to %s bytes (extraneous %s bytes)",
+        len(payload),
+        len(trimmed),
+        len(payload) - len(trimmed),
+    )
+    return trimmed
+
+
 def decode_to_rgb(payload: bytes, stream_format: StreamFormat, frame: FrameInfo):
     """Convert a raw payload into an RGB image (numpy array).
 
@@ -2530,10 +2550,11 @@ def decode_to_rgb(payload: bytes, stream_format: StreamFormat, frame: FrameInfo)
         except ImportError as exc:  # pragma: no cover - optional dependency
             raise RuntimeError("OpenCV required for MJPEG decoding") from exc
 
-        arr = np.frombuffer(payload, dtype=np.uint8)
+        cleaned = _trim_mjpeg_payload(payload)
+        arr = np.frombuffer(cleaned, dtype=np.uint8)
         bgr = cv2.imdecode(arr, cv2.IMREAD_COLOR)
         if bgr is None:
-            raise RuntimeError("Failed to decode MJPEG frame")
+            raise RuntimeError("Failed to decode MJPEG frame (corrupt or unsupported payload)")
         rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
         return rgb
 
