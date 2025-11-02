@@ -2153,6 +2153,7 @@ class UVCCamera:
     def capture_still_image(self, *, timeout_ms: int = 2000) -> CapturedFrame:
         """Trigger and fetch a single still image using the negotiated settings."""
 
+        was_claimed = self._claimed
         if self._still_format is None or self._still_frame is None:
             raise UVCError("Still image parameters not configured; call configure_still_image() first")
 
@@ -2218,6 +2219,9 @@ class UVCCamera:
                 self._active_alt = previous_alt
                 self._endpoint_address = previous_endpoint
                 self._max_payload = previous_payload
+
+            if not was_claimed:
+                self._release_interface(reset_alt=False)
 
         return frame
 

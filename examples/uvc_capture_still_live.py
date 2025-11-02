@@ -82,26 +82,25 @@ def main() -> int:
 
             try:
                 time.sleep(2.0)
-
-                info = camera.configure_still_image(
-                    width=args.width,
-                    height=args.height,
-                    codec=CodecPreference.MJPEG,
-                )
-                LOG.info("Still PROBE/COMMIT info: %s", info)
-                time.sleep(1.0)
-
-                frame = camera.capture_still_image(timeout_ms=max(1000, args.timeout))
-                LOG.info(
-                    "Captured still frame %sx%s (%d bytes)",
-                    frame.frame.width,
-                    frame.frame.height,
-                    len(frame.payload),
-                )
-                save_payload(args.output, frame.payload, frame.format, frame.frame)
             finally:
                 stop_event.set()
                 worker.join(timeout=2.0)
+
+            info = camera.configure_still_image(
+                width=args.width,
+                height=args.height,
+                codec=CodecPreference.MJPEG,
+            )
+            LOG.info("Still PROBE/COMMIT info: %s", info)
+
+            frame = camera.capture_still_image(timeout_ms=max(1000, args.timeout))
+            LOG.info(
+                "Captured still frame %sx%s (%d bytes)",
+                frame.frame.width,
+                frame.frame.height,
+                len(frame.payload),
+            )
+            save_payload(args.output, frame.payload, frame.format, frame.frame)
 
     except UVCError as exc:
         print(f"Failed to capture still image: {exc}")
