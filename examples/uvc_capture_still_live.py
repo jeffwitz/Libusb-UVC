@@ -80,15 +80,16 @@ def main() -> int:
             worker = threading.Thread(target=stream_worker, args=(camera, stop_event), daemon=True)
             worker.start()
 
-            time.sleep(2.0)  # allow stream to stabilise
-
             try:
+                time.sleep(2.0)
+
                 info = camera.configure_still_image(
                     width=args.width,
                     height=args.height,
                     codec=CodecPreference.MJPEG,
                 )
                 LOG.info("Still PROBE/COMMIT info: %s", info)
+                time.sleep(1.0)
 
                 frame = camera.capture_still_image(timeout_ms=max(1000, args.timeout))
                 LOG.info(
