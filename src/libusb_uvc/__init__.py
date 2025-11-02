@@ -277,6 +277,11 @@ class FrameInfo:
         unique = sorted({v for v in self.intervals_100ns if v})
         return [_interval_to_hz(v) for v in unique]
 
+    @property
+    def intervals(self) -> List[float]:
+        """Backward compatibility alias returning frame intervals in Hz."""
+
+        return self.intervals_hz()
     def pick_interval(
         self, target_fps: Optional[float], *, strict: bool = False, tolerance_hz: float = 1e-3
     ) -> int:
@@ -2715,7 +2720,8 @@ def _vc_get_len(dev: usb.core.Device, vc_if: int, unit_id: int, selector: int):
     data = vc_ctrl_get(dev, vc_if, unit_id, selector, GET_LEN, 2)
     if not data or len(data) < 2:
         return None
-    return int.from_bytes(data[:2], "little")
+    value = int.from_bytes(data[:2], "little")
+    return value or None
 
 
 def read_vc_control_value(dev: usb.core.Device, vc_if: int, unit_id: int, selector: int, request: int, *, length_hint: int = 64):
