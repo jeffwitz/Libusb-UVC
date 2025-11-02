@@ -106,6 +106,27 @@ python3 examples/uvc_capture_frame.py \
 
 The script relies on `UVCCamera.stream()` to grab one frame, automatically converts MJPEG/YUYV when possible, and resets the device when it exits so `/dev/video*` remains usable.
 
+### Select a specific sensor interface
+
+Many cameras expose multiple UVC streaming interfaces (for example, a colour
+sensor and an infrared sensor on the same USB device).  Use `uvc_capture_video.py
+ --list` to discover every interface/format combination, then pass
+`--interface` when launching the preview:
+
+```bash
+# RGB sensor on interface 1
+python3 examples/uvc_capture_video.py \
+    --vid 0x0408 --pid 0x5473 \
+    --interface 1 \
+    --width 1280 --height 720 --fps 30 --codec mjpeg
+
+# Infrared sensor on interface 3 (400x400 GRAY)
+python3 examples/uvc_capture_video.py \
+    --vid 0x0408 --pid 0x5473 \
+    --interface 3 \
+    --width 400 --height 400 --fps 15 --codec yuyv
+```
+
 ### Live video preview (OpenCV)
 
 ```bash

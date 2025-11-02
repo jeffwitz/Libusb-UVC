@@ -63,6 +63,26 @@ The script claims both the control and streaming interfaces, negotiates
 PROBE/COMMIT, and resets the device on exit so ``/dev/video*`` remains usable.
 Press ``q`` or ``Esc`` to close the window early.
 
+Multiple Sensors on One Device
+------------------------------
+
+Some hardware (for example laptops with RGB and IR sensors in the same module)
+exposes several Video Streaming interfaces.  Run the preview helper with
+``--list`` to discover every interface and format::
+
+   python3 examples/uvc_capture_video.py --vid 0x0408 --pid 0x5473 --list
+
+Then pass ``--interface`` to select the desired stream.  Interface ``1`` on the
+HP 5 MP camera is RGB, while interface ``3`` provides a 400x400 infrared feed::
+
+   python3 examples/uvc_capture_video.py \
+       --vid 0x0408 --pid 0x5473 \
+       --interface 3 \
+       --width 400 --height 400 --fps 15 --codec yuyv
+
+The same flag works throughout the examples directory, including the dedicated
+``uvc_ir_inspect.py`` helper which lists controls and saves IR frames.
+
 Minimal Python Usage
 --------------------
 
