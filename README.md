@@ -223,6 +223,12 @@ with UVCCamera.open(vid=0x0408, pid=0x5473, interface=1) as cam:
 
 The stream iterator handles all PROBE/COMMIT steps, asynchronous transfers, and frame reassembly for you.
 
+## Roadmap / To Do
+
+- **Compressed payload support (H.264/H.265/AV1/VP8):** today the library focuses on uncompressed and MJPEG streams; adding decoders and payload negotiation for the modern compressed formats will require parsing their specific payload headers and, in many cases, reverse engineering device behaviour.
+- **UVC still image capture:** the still-image trigger/control path defined by the UVC specification is not yet exposed; implementing it involves wiring the Still Image Capture Method, associated endpoints, and control/state transitions.
+- **Control coverage & vendor quirks:** even when a control is advertised (for example an IR torch selector), firmwares often expect vendor-specific messages. Mapping them reliably demands per-device investigation or reverse engineering before they can become first-class features in the toolkit.
+
 ## 3. Troubleshooting
 
 - **Permission Denied:** Ensure your udev rule is correctly installed, has the right VID/PID, and that your user is in the `plugdev` group.

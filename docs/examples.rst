@@ -52,6 +52,14 @@ validated control (using Microsoft XU hints when available) and captures a
 handful of IR frames, saving raw payloads alongside optional PNG conversions.
 Use ``--interface`` to select the IR streaming interface number.
 
+``uvc_ir_torch_demo.py``
+------------------------
+
+Open the IR preview while sweeping the vendor-specific ``LED Control``.  Many
+devices expose a writable selector but expect undocumented values; this helper
+demonstrates how to experiment with those controls while reiterating that real
+hardware behaviour may require per-device reverse engineering.
+
 ``exposure_sweep.py``
 ---------------------
 
@@ -73,3 +81,16 @@ Each script relies on :class:`libusb_uvc.UVCCamera` for interface claiming and
 stream lifecycle management. Use them as references when building your own
 applications, or import their helper functions directly if you need to iterate
 quickly.
+
+Future Work
+-----------
+
+- **Compressed payload codecs (H.264/H.265/AV1/VP8)**: support is not yet
+  implemented; handling those streams would require parsing their specific UVC
+  payload headers and integrating suitable decoders.
+- **UVC still-image capture**: the still-image trigger and transfer flow remains
+  on the roadmap; implementing it means wiring the dedicated controls and
+  endpoints defined by the specification.
+- **Vendor-specific controls**: even when a selector is advertised, many
+  firmwares only respond to proprietary messages.  Completing those features
+  demands reverse engineering or documentation from the manufacturer.
