@@ -38,6 +38,7 @@ py-modules = ["uvc_usb"]
     "examples/uvc_display_frame.py",
     "examples/uvc_inspect.py",
     "examples/uvc_ir_inspect.py",
+    "examples/uvc_ir_torch_demo.py",
     "examples/uvc_led_preview.py",
     "examples/uvc_generate_quirk.py",
     "examples/exposure_sweep.py",
