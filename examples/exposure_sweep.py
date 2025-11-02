@@ -22,8 +22,7 @@ except ImportError:  # pragma: no cover
 LOG = logging.getLogger("exposure_sweep")
 
 
-def find_control(camera: UVCCamera, *names: str) -> Optional[ControlEntry]:
-    entries = camera.enumerate_controls(refresh=True)
+def find_control(entries: List[ControlEntry], *names: str) -> Optional[ControlEntry]:
     lower_map = {entry.name.lower(): entry for entry in entries}
     for name in names:
         entry = lower_map.get(name.lower())
@@ -76,8 +75,15 @@ def main() -> int:
         ) as camera:
             print(f"Using device: {describe_device(camera.device)}")
 
+            try:
+                controls = camera.enumerate_controls(refresh=True)
+            except RuntimeError as exc:
+                print(f"Unable to enumerate controls: {exc}")
+                print("Hint: enable auto-detach or detach the kernel driver manually.")
+                return 1
+
             auto_ctrl = find_control(
-                camera,
+                controls,
                 "Auto Exposure Mode",
                 "Exposure Auto",
                 "Exposure, Auto",
@@ -89,7 +95,7 @@ def main() -> int:
                 except (UVCError, usb.core.USBError) as exc:
                     LOG.warning("Failed to set auto exposure mode (%s)", exc)
 
-            priority_ctrl = find_control(camera, "Exposure Auto Priority")
+            priority_ctrl = find_control(controls, "Exposure Auto Priority")
             if priority_ctrl and priority_ctrl.is_writable():
                 try:
                     camera.set_control(priority_ctrl, 0)
@@ -97,7 +103,7 @@ def main() -> int:
                 except (UVCError, usb.core.USBError) as exc:
                     LOG.debug("Unable to clear exposure priority: %s", exc)
 
-            exposure_ctrl = find_control(camera, "Exposure Time, Absolute")
+            exposure_ctrl = find_control(controls, "Exposure Time, Absolute")
             if not exposure_ctrl or not exposure_ctrl.is_writable():
                 print("Exposure control not available or not writable on this device.")
                 return 1
