@@ -1067,7 +1067,11 @@ def _perform_probe_commit_with_length(
 
 
 
-from .uvc_async import IsoConfig, UVCPacketStream, InterruptConfig, InterruptListener
+# Support being imported either as part of the package (legacy shim) or directly.
+try:
+    from .uvc_async import IsoConfig, UVCPacketStream, InterruptConfig, InterruptListener
+except ImportError:  # pragma: no cover - fallback for legacy shim import path
+    from libusb_uvc.uvc_async import IsoConfig, UVCPacketStream, InterruptConfig, InterruptListener
 class UVCCamera:
     """Minimal helper to configure a streaming interface and fetch frames."""
 

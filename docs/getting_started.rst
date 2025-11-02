@@ -29,6 +29,17 @@ For the optional MJPEG preview window, also install GStreamer bindings::
 
    sudo apt-get install -y python3-gi gir1.2-gst-1.0 gstreamer1.0-plugins-good
 
+Building Distribution Artifacts
+-------------------------------
+
+If you need a wheel or source distribution, invoke the PEP 517 build frontend::
+
+   python3 -m build
+
+This requires the :mod:`build` and :mod:`wheel` modules.  On Debian/Ubuntu they
+are packaged as ``python3-build`` and ``python3-wheel``; inside a virtual
+environment you can instead ``pip install build wheel``.
+
 Udev Rules
 ----------
 
@@ -79,4 +90,3 @@ Next Steps
 - :doc:`controls_and_streaming` explains how descriptors map to Python objects.
 - :doc:`examples` documents each helper script that ships with libusb-uvc.
 - :doc:`api` lists the full reference for controls, streaming helpers, and low-level utilities.
-

@@ -8,11 +8,10 @@ version = "0.1.0"
 description = "High-level libusb-based helpers for USB Video Class cameras"
 readme = "README.md"
 authors = [{name = "Libusb-UVC Contributors"}]
-license = {text = "MIT"}
+license = "MIT"
 requires-python = ">=3.8"
 classifiers = [
     "Programming Language :: Python :: 3",
-    "License :: OSI Approved :: MIT License",
     "Topic :: Multimedia :: Video",
     "Topic :: System :: Hardware :: Hardware Drivers",
 ]
@@ -29,8 +28,10 @@ full = ["opencv-python>=4.5", "Pillow>=9.0"]
 docs = ["sphinx>=7.0", "sphinx-rtd-theme>=1.3"]
 
 [tool.setuptools]
-package-dir = {"" = "src"}
+packages = ["libusb_uvc", "libusb_uvc.quirks"]
+package-dir = {"libusb_uvc" = "src/libusb_uvc"}
 include-package-data = true
+py-modules = ["uvc_usb"]
 "script-files" = [
     "examples/uvc_capture_video.py",
     "examples/uvc_capture_frame.py",
@@ -40,9 +41,6 @@ include-package-data = true
     "examples/uvc_generate_quirk.py",
     "examples/exposure_sweep.py",
 ]
-
-[tool.setuptools.packages.find]
-where = ["src"]
 
 [tool.setuptools.package-data]
 "libusb_uvc" = ["quirks/*.json"]

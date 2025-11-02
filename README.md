@@ -57,6 +57,18 @@ sphinx-build -M html docs docs/_build
 
 The generated HTML will be available at `docs/_build/html/index.html`.
 
+### Building distribution artifacts
+
+To build wheels or source archives locally use:
+
+```bash
+python3 -m build
+```
+
+The command relies on the `build` and `wheel` modules.  On Debian/Ubuntu install
+them via `sudo apt-get install python3-build python3-wheel`, or inside a virtual
+environment run `pip install build wheel`.
+
 ### Udev Rule (for non-root access)
 
 To access the camera without `sudo`, copy and adapt the provided udev rule, then reload the system rules.
