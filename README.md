@@ -132,6 +132,20 @@ python3 examples/uvc_generate_quirk.py \
 
 The script inspects Extension Unit selectors and writes a ready-to-edit JSON file that can be dropped into `src/libusb_uvc/quirks/`.
 
+### Inspect the infrared channel
+
+```bash
+python3 examples/uvc_ir_inspect.py \
+    --vid 0x0408 --pid 0x5473 \
+    --interface 3 \
+    --frames 3 \
+    --output-dir ir_samples
+```
+
+The helper lists every validated control (including Microsoft XU names when
+available) and captures a few raw infrared frames, saving PNG conversions when
+Pillow is installed.
+
 ### Microsoft Camera Control XU
 
 Libusb-UVC ships a baseline descriptor for the Microsoft Camera Control

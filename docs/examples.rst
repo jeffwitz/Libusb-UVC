@@ -44,6 +44,14 @@ Introspect the camera's streaming descriptors and Video Control units. The
 output lists formats, frames, alternate settings, and control metadata,
 combining quirk definitions with live ``GET_*`` queries.
 
+``uvc_ir_inspect.py``
+---------------------
+
+Target the infrared sensor of dual-camera hardware. The script prints every
+validated control (using Microsoft XU hints when available) and captures a
+handful of IR frames, saving raw payloads alongside optional PNG conversions.
+Use ``--interface`` to select the IR streaming interface number.
+
 ``exposure_sweep.py``
 ---------------------
 
