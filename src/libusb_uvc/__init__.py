@@ -2496,6 +2496,39 @@ def yuy2_to_rgb(payload: bytes, width: int, height: int):
     return np.clip(rgb, 0, 255).astype(np.uint8)
 
 
+def gray8_to_rgb(payload: bytes, width: int, height: int):
+    """Convert an 8-bit grayscale payload into an RGB array."""
+
+    try:
+        import numpy as np
+    except ModuleNotFoundError as exc:  # pragma: no cover - optional dependency
+        raise RuntimeError("numpy is required to convert grayscale payloads") from exc
+
+    expected = width * height
+    if len(payload) != expected:
+        raise ValueError(f"GRAY8 payload length {len(payload)} does not match {width}x{height}")
+
+    gray = np.frombuffer(payload, dtype=np.uint8).reshape((height, width))
+    return np.repeat(gray[:, :, None], 3, axis=2)
+
+
+def gray16_to_rgb(payload: bytes, width: int, height: int):
+    """Convert a 16-bit grayscale payload into an RGB array (scaled to 8-bit)."""
+
+    try:
+        import numpy as np
+    except ModuleNotFoundError as exc:  # pragma: no cover - optional dependency
+        raise RuntimeError("numpy is required to convert grayscale payloads") from exc
+
+    expected = width * height * 2
+    if len(payload) != expected:
+        raise ValueError(f"GRAY16 payload length {len(payload)} does not match {width}x{height}")
+
+    gray16 = np.frombuffer(payload, dtype=np.uint16).reshape((height, width))
+    gray8 = (gray16 >> 8).astype(np.uint8)
+    return np.repeat(gray8[:, :, None], 3, axis=2)
+
+
 def decode_to_rgb(payload: bytes, stream_format: StreamFormat, frame: FrameInfo):
     """Convert a raw payload into an RGB image (numpy array).
 
@@ -2504,7 +2537,20 @@ def decode_to_rgb(payload: bytes, stream_format: StreamFormat, frame: FrameInfo)
     """
 
     name = stream_format.description.upper()
-    if "YUY" in name or stream_format.subtype == VS_FORMAT_UNCOMPRESSED:
+    payload_len = len(payload)
+
+    if stream_format.subtype == VS_FORMAT_UNCOMPRESSED:
+        if payload_len == frame.width * frame.height:
+            return gray8_to_rgb(payload, frame.width, frame.height)
+        if (
+            payload_len == frame.width * frame.height * 2
+            and "YUY" not in name
+            and "YUV" not in name
+        ):
+            return gray16_to_rgb(payload, frame.width, frame.height)
+        if "YUY" in name or "YUV" in name:
+            return yuy2_to_rgb(payload, frame.width, frame.height)
+        # Fallback to the previous behaviour for other uncompressed formats.
         return yuy2_to_rgb(payload, frame.width, frame.height)
 
     if stream_format.subtype == VS_FORMAT_MJPEG or "MJPG" in name:
