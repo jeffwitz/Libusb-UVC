@@ -19,7 +19,7 @@ import pathlib
 import queue
 import threading
 import time
-from typing import Callable, Dict, Iterable, Iterator, List, Optional, Tuple, Union
+from typing import Callable, Dict, Iterable, Iterator, List, Optional, Set, Tuple, Union
 
 import usb.core
 import usb.util
@@ -300,6 +300,36 @@ class FrameInfo:
 
         return bool(self.bm_capabilities & 0x01)
 
+    def pick_interval(
+        self,
+        target_fps: Optional[float],
+        *,
+        strict: bool = False,
+        tolerance_hz: float = 1e-3,
+    ) -> int:
+        """Return the closest advertised frame interval to ``target_fps``."""
+
+        intervals = [value for value in self.intervals_100ns if value]
+        if not intervals:
+            if self.default_interval:
+                return self.default_interval
+            if target_fps and target_fps > 0:
+                return int(round(1e7 / target_fps))
+            raise ValueError("Frame descriptor does not advertise any intervals")
+
+        if target_fps is None or target_fps <= 0:
+            return self.default_interval or intervals[0]
+
+        target_interval = int(round(1e7 / target_fps))
+        best = min(intervals, key=lambda value: abs(value - target_interval))
+        if strict:
+            actual_fps = _interval_to_hz(best)
+            if abs(actual_fps - target_fps) > tolerance_hz:
+                raise ValueError(
+                    f"No advertised frame interval matches {target_fps} fps (closest {actual_fps:.6f} fps)"
+                )
+        return best
+
 
 @dataclasses.dataclass
 class StillFrameInfo:
@@ -308,24 +338,11 @@ class StillFrameInfo:
     width: int
     height: int
     endpoint_address: int
+    frame_index: int
     compression_indices: List[int] = dataclasses.field(default_factory=list)
+    format_index: int = 0
     format_subtype: Optional[int] = None
-    def pick_interval(
-        self, target_fps: Optional[float], *, strict: bool = False, tolerance_hz: float = 1e-3
-    ) -> int:
-        if not self.intervals_100ns:
-            return self.default_interval
-        if target_fps is None or target_fps <= 0:
-            return self.default_interval or self.intervals_100ns[0]
-        target_interval = int(round(1e7 / target_fps))
-        best = min(self.intervals_100ns, key=lambda value: abs(value - target_interval))
-        if strict:
-            actual_fps = _interval_to_hz(best)
-            if abs(actual_fps - target_fps) > tolerance_hz:
-                raise ValueError(
-                    f"No advertised frame interval matches {target_fps} fps (closest {actual_fps:.6f} fps)"
-                )
-        return best
+    max_frame_size: int = 0
 
 
 @dataclasses.dataclass
@@ -363,6 +380,12 @@ class StreamingInterface:
     def get_alt(self, alternate_setting: int) -> Optional[AltSettingInfo]:
         for alt in self.alt_settings:
             if alt.alternate_setting == alternate_setting:
+                return alt
+        return None
+
+    def find_alt_by_endpoint(self, endpoint_address: int) -> Optional[AltSettingInfo]:
+        for alt in self.alt_settings:
+            if alt.endpoint_address == endpoint_address:
                 return alt
         return None
 
@@ -438,7 +461,7 @@ class CapturedFrame:
 
     payload: bytes
     format: StreamFormat
-    frame: FrameInfo
+    frame: Union[FrameInfo, StillFrameInfo]
     fid: int
     pts: Optional[int]
     timestamp: float = dataclasses.field(default_factory=time.time)
@@ -746,7 +769,13 @@ def parse_vs_descriptors(extra: bytes) -> List[StreamFormat]:
                 if frame:
                     current_format.frames.append(frame)
             elif subtype == VS_STILL_IMAGE_FRAME_DESCRIPTOR and current_format:
-                current_format.still_frames.extend(_parse_still_frame_descriptor(payload))
+                current_format.still_frames.extend(
+                    _parse_still_frame_descriptor(
+                        payload,
+                        format_index=current_format.format_index,
+                        format_subtype=current_format.subtype,
+                    )
+                )
 
         idx += length
 
@@ -816,7 +845,9 @@ def _parse_frame_descriptor(desc: bytes) -> Optional[FrameInfo]:
     )
 
 
-def _parse_still_frame_descriptor(desc: bytes) -> List[StillFrameInfo]:
+def _parse_still_frame_descriptor(
+    desc: bytes, *, format_index: int, format_subtype: int
+) -> List[StillFrameInfo]:
     if len(desc) < 5:
         return []
 
@@ -825,12 +856,21 @@ def _parse_still_frame_descriptor(desc: bytes) -> List[StillFrameInfo]:
     offset = 5
     frames: List[StillFrameInfo] = []
 
-    for _ in range(num_sizes):
+    for idx in range(1, num_sizes + 1):
         if offset + 4 > len(desc):
             break
         width = int.from_bytes(desc[offset : offset + 2], "little")
         height = int.from_bytes(desc[offset + 2 : offset + 4], "little")
-        frames.append(StillFrameInfo(width=width, height=height, endpoint_address=endpoint))
+        frames.append(
+            StillFrameInfo(
+                width=width,
+                height=height,
+                endpoint_address=endpoint,
+                frame_index=idx,
+                format_index=format_index,
+                format_subtype=format_subtype,
+            )
+        )
         offset += 4
 
     if offset >= len(desc):
@@ -968,43 +1008,60 @@ def resolve_still_preference(
     width: int,
     height: int,
     codec: str = CodecPreference.AUTO,
-) -> Tuple[StreamFormat, FrameInfo]:
+) -> Tuple[StreamFormat, Union[FrameInfo, StillFrameInfo]]:
     codec = codec.lower()
 
-    def _find(subtype: Optional[int]) -> Optional[Tuple[StreamFormat, FrameInfo]]:
+    def _match_candidates(
+        candidates: List[Tuple[StreamFormat, Union[FrameInfo, StillFrameInfo]]]
+    ) -> Optional[Tuple[StreamFormat, Union[FrameInfo, StillFrameInfo]]]:
+        if not candidates:
+            return None
+        if width and height:
+            for fmt, frame in candidates:
+                if frame.width == width and frame.height == height:
+                    return fmt, frame
+        if width or height:
+            for fmt, frame in candidates:
+                if (not width or frame.width == width) and (not height or frame.height == height):
+                    return fmt, frame
+        # Prefer the highest resolution otherwise.
+        return max(candidates, key=lambda item: item[1].width * item[1].height)
+
+    def _collect(
+        subtype: Optional[int],
+    ) -> Optional[Tuple[StreamFormat, Union[FrameInfo, StillFrameInfo]]]:
+        method1: List[Tuple[StreamFormat, FrameInfo]] = []
+        method2: List[Tuple[StreamFormat, StillFrameInfo]] = []
         for fmt in interface.formats:
             if subtype is not None and fmt.subtype != subtype:
                 continue
             for frame in fmt.frames:
-                if not frame.supports_still:
-                    continue
-                if width and height:
-                    if frame.width == width and frame.height == height:
-                        return fmt, frame
-                elif frame.width == width or frame.height == height:
-                    return fmt, frame
-        return None
+                if frame.supports_still:
+                    method1.append((fmt, frame))
+            for still in fmt.still_frames:
+                method2.append((fmt, still))
 
-    order: List[int] = []
+        match = _match_candidates(method1)
+        if match is not None:
+            return match
+        return _match_candidates(method2)
+
+    codec_order: List[int]
     if codec == CodecPreference.YUYV:
-        order = [VS_FORMAT_UNCOMPRESSED]
+        codec_order = [VS_FORMAT_UNCOMPRESSED]
     elif codec == CodecPreference.MJPEG:
-        order = [VS_FORMAT_MJPEG]
+        codec_order = [VS_FORMAT_MJPEG]
     else:
-        order = [VS_FORMAT_UNCOMPRESSED, VS_FORMAT_MJPEG]
+        codec_order = [VS_FORMAT_UNCOMPRESSED, VS_FORMAT_MJPEG]
 
-    for subtype in order:
-        match = _find(subtype)
+    for subtype in codec_order:
+        match = _collect(subtype)
         if match is not None:
             return match
 
-    # Fallback: any still-capable frame
-    for fmt, frame in interface.iter_still_frames():
-        if width and height:
-            if frame.width == width and frame.height == height:
-                return fmt, frame
-        else:
-            return fmt, frame
+    match = _collect(None)
+    if match is not None:
+        return match
 
     raise UVCError("No still-image capable frames advertised on this interface")
 
@@ -1391,7 +1448,7 @@ class UVCCamera:
         self._endpoint_address: Optional[int] = None
         self._max_payload: Optional[int] = None
         self._format: Optional[StreamFormat] = None
-        self._frame: Optional[FrameInfo] = None
+        self._frame: Optional[Union[FrameInfo, StillFrameInfo]] = None
         self._async_ctx: Optional[usb1.USBContext] = None
         self._async_handle: Optional[usb1.USBDeviceHandle] = None
         self._async_stream: Optional[UVCPacketStream] = None
@@ -1413,11 +1470,18 @@ class UVCCamera:
         self._committed_frame_index: Optional[int] = None
 
         self._still_format: Optional[StreamFormat] = None
-        self._still_frame: Optional[FrameInfo] = None
+        self._still_frame: Optional[Union[FrameInfo, StillFrameInfo]] = None
         self._still_compression_index: int = 1
         self._still_payload: int = 0
         self._still_alt_info: Optional[AltSettingInfo] = None
         self._still_frame_size: Optional[int] = None
+        self._still_method: int = 1
+        self._still_endpoint_hint: Optional[int] = None
+        self._still_candidates: List[Tuple[StreamFormat, Union[FrameInfo, StillFrameInfo]]] = []
+        self._still_candidate_pos: int = 0
+        self._still_allow_fallback: bool = False
+        self._still_requested_compression: int = 1
+        self._still_requested_codec: str = CodecPreference.AUTO
 
         vc_interface = None
         for cfg in device:
@@ -1775,7 +1839,8 @@ class UVCCamera:
                 )
             self._active_alt = 0
 
-        usb.util.release_interface(self.device, self.interface_number)
+        with contextlib.suppress(usb.core.USBError):
+            usb.util.release_interface(self.device, self.interface_number)
         if self._reattach:
             with contextlib.suppress(usb.core.USBError):
                 self.device.attach_kernel_driver(self.interface_number)
@@ -1833,7 +1898,7 @@ class UVCCamera:
         codec: CodecPreference = CodecPreference.AUTO,
         format_index: Optional[int] = None,
         frame_index: Optional[int] = None,
-    ) -> Tuple[StreamFormat, FrameInfo]:
+    ) -> Tuple[StreamFormat, Union[FrameInfo, StillFrameInfo]]:
         """Resolve a still-image capable format/frame pairing."""
 
         if width is not None and height is not None:
@@ -1849,26 +1914,251 @@ class UVCCamera:
                 if fmt.format_index != format_index:
                     continue
                 if frame_index is None:
-                    for frame in fmt.frames:
-                        if frame.supports_still:
-                            return fmt, frame
-                    raise UVCError(f"Format index {format_index} exposes no still-capable frames")
+                    candidates: List[Tuple[StreamFormat, Union[FrameInfo, StillFrameInfo]]] = []
+                    candidates.extend((fmt, frame) for frame in fmt.frames if frame.supports_still)
+                    candidates.extend((fmt, frame) for frame in fmt.still_frames)
+                    if not candidates:
+                        raise UVCError(f"Format index {format_index} exposes no still-capable frames")
+                    return max(candidates, key=lambda item: item[1].width * item[1].height)
                 for frame in fmt.frames:
                     if frame.frame_index == frame_index and frame.supports_still:
                         return fmt, frame
-            raise UVCError(f"Format index {format_index} / frame {frame_index} not advertised for still images")
+                for frame in fmt.still_frames:
+                    if frame.frame_index == frame_index:
+                        return fmt, frame
+            raise UVCError(
+                f"Format index {format_index} / frame {frame_index} not advertised for still images"
+            )
 
         # Default: choose the highest-resolution still-capable frame.
-        best: Optional[Tuple[StreamFormat, FrameInfo]] = None
+        best: Optional[Tuple[StreamFormat, Union[FrameInfo, StillFrameInfo]]] = None
         best_area = -1
         for fmt, frame in self.interface.iter_still_frames():
             area = frame.width * frame.height
             if area > best_area:
                 best = (fmt, frame)
                 best_area = area
+        if best_area >= 0:
+            return best  # type: ignore[return-value]
+
+        # No method 1 support; look for Method 2 descriptors instead.
+        for fmt in self.interface.formats:
+            for frame in fmt.still_frames:
+                area = frame.width * frame.height
+                if area > best_area:
+                    best = (fmt, frame)
+                    best_area = area
+
         if best is None:
             raise UVCError("No still-image capable frames advertised on this interface")
         return best
+
+    def _configure_specific_still(
+        self,
+        stream_format: StreamFormat,
+        frame_choice: Union[FrameInfo, StillFrameInfo],
+        compression_index: int,
+    ) -> dict:
+        requested_method = 2 if isinstance(frame_choice, StillFrameInfo) else 1
+        if requested_method == 1 and isinstance(frame_choice, FrameInfo):
+            if not frame_choice.supports_still:
+                raise UVCError("Selected frame does not advertise still-image support")
+
+        compression = compression_index if compression_index and compression_index > 0 else 1
+        if isinstance(frame_choice, StillFrameInfo) and frame_choice.compression_indices:
+            if compression not in frame_choice.compression_indices:
+                preferred = frame_choice.compression_indices[0]
+                if compression_index and compression_index not in frame_choice.compression_indices:
+                    LOG.warning(
+                        "Requested still compression index %s not advertised; using %s",
+                        compression_index,
+                        preferred,
+                    )
+                compression = preferred
+
+        self._ensure_claimed()
+        info = perform_still_probe_commit(
+            self.device,
+            self.interface_number,
+            stream_format,
+            frame_choice,
+            compression_index=compression,
+            do_commit=True,
+        )
+
+        negotiated_format_idx = info.get("bFormatIndex")
+        negotiated_frame_idx = info.get("bFrameIndex")
+
+        actual_format = stream_format
+        if isinstance(negotiated_format_idx, int) and negotiated_format_idx:
+            actual_format = next(
+                (fmt for fmt in self.interface.formats if fmt.format_index == negotiated_format_idx),
+                stream_format,
+            )
+
+        actual_frame: Union[FrameInfo, StillFrameInfo] = frame_choice
+        if isinstance(negotiated_frame_idx, int) and negotiated_frame_idx and actual_format:
+            candidate: Optional[Union[FrameInfo, StillFrameInfo]] = None
+            if actual_format.still_frames and requested_method == 2:
+                candidate = next(
+                    (frame for frame in actual_format.still_frames if frame.frame_index == negotiated_frame_idx),
+                    None,
+                )
+            if candidate is None:
+                candidate = next(
+                    (frame for frame in actual_format.frames if frame.frame_index == negotiated_frame_idx),
+                    None,
+                )
+            if candidate is None and actual_format.still_frames:
+                candidate = next(
+                    (frame for frame in actual_format.still_frames if frame.frame_index == negotiated_frame_idx),
+                    None,
+                )
+            if candidate is not None:
+                actual_frame = candidate
+
+        if isinstance(actual_frame, StillFrameInfo):
+            method = 2
+            matching_stream = next(
+                (
+                    candidate
+                    for candidate in actual_format.frames
+                    if candidate.width == actual_frame.width and candidate.height == actual_frame.height
+                ),
+                None,
+            )
+            if actual_frame.max_frame_size == 0 and matching_stream is not None:
+                actual_frame.max_frame_size = matching_stream.max_frame_size
+            if actual_frame.max_frame_size == 0 and actual_format.subtype == VS_FORMAT_UNCOMPRESSED:
+                actual_frame.max_frame_size = actual_frame.width * actual_frame.height * 2
+        else:
+            method = 1
+            if not actual_frame.supports_still:
+                raise UVCError("Negotiated still frame does not advertise still-image support")
+
+        negotiated_compression = info.get("bCompressionIndex")
+        effective_compression = compression
+        if isinstance(negotiated_compression, int) and negotiated_compression:
+            effective_compression = negotiated_compression
+        elif method == 2 and isinstance(actual_frame, StillFrameInfo) and actual_frame.compression_indices:
+            if effective_compression not in actual_frame.compression_indices:
+                effective_compression = actual_frame.compression_indices[0]
+
+        endpoint_hint: Optional[int] = None
+        if isinstance(actual_frame, StillFrameInfo):
+            endpoint_hint = actual_frame.endpoint_address or None
+
+        frame_max_size = getattr(actual_frame, "max_frame_size", 0)
+        payload_hint = (
+            info.get("dwMaxPayloadTransferSize")
+            or info.get("dwMaxVideoFrameSize")
+            or frame_max_size
+            or 0
+        )
+
+        alt_info: Optional[AltSettingInfo] = None
+        if endpoint_hint:
+            alt_info = self.interface.find_alt_by_endpoint(endpoint_hint)
+        if alt_info is None and payload_hint:
+            alt_info = self.interface.select_alt_for_payload(payload_hint)
+        if alt_info is None and endpoint_hint:
+            alt_info = self.interface.find_alt_by_endpoint(endpoint_hint)
+        if alt_info is None and self._endpoint_address is None:
+            alt_info = next(
+                (alt for alt in reversed(self.interface.alt_settings) if alt.endpoint_address),
+                None,
+            )
+        if alt_info is None and self._endpoint_address is None:
+            raise UVCError("Unable to resolve an alternate setting for still capture")
+
+        frame_size_guess = info.get("dwMaxVideoFrameSize") or frame_max_size
+        if not frame_size_guess and actual_format.subtype == VS_FORMAT_UNCOMPRESSED:
+            frame_size_guess = actual_frame.width * actual_frame.height * 2
+
+        self._still_method = method
+        self._still_format = actual_format
+        self._still_frame = actual_frame
+        self._still_endpoint_hint = endpoint_hint if endpoint_hint else None
+        self._still_compression_index = effective_compression
+        self._still_payload = int(payload_hint)
+        self._still_alt_info = alt_info
+        self._still_frame_size = int(frame_size_guess or 0)
+
+        return info
+
+    def _still_candidate_key(
+        self,
+        stream_format: StreamFormat,
+        frame: Union[FrameInfo, StillFrameInfo],
+    ) -> Tuple[str, int, int]:
+        kind = "still" if isinstance(frame, StillFrameInfo) else "stream"
+        return (kind, stream_format.format_index, frame.frame_index)
+
+    def _collect_still_candidates(
+        self,
+        codec: str,
+    ) -> List[Tuple[StreamFormat, Union[FrameInfo, StillFrameInfo]]]:
+        codec = codec.lower()
+        if codec == CodecPreference.YUYV:
+            subtype_order = [VS_FORMAT_UNCOMPRESSED]
+            include_remaining = False
+        elif codec == CodecPreference.MJPEG:
+            subtype_order = [VS_FORMAT_MJPEG]
+            include_remaining = False
+        else:
+            subtype_order = [VS_FORMAT_MJPEG, VS_FORMAT_UNCOMPRESSED]
+            include_remaining = True
+
+        seen: set = set()
+        result: List[Tuple[StreamFormat, Union[FrameInfo, StillFrameInfo]]] = []
+
+        def _add_for_subtype(subtype: Optional[int]) -> None:
+            subset: List[Tuple[StreamFormat, Union[FrameInfo, StillFrameInfo]]] = []
+            for fmt in self.interface.formats:
+                if subtype is not None and fmt.subtype != subtype:
+                    continue
+                for still in fmt.still_frames:
+                    key = self._still_candidate_key(fmt, still)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    subset.append((fmt, still))
+                for frame in fmt.frames:
+                    if not frame.supports_still:
+                        continue
+                    key = self._still_candidate_key(fmt, frame)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    subset.append((fmt, frame))
+            subset.sort(key=lambda item: item[1].width * item[1].height, reverse=True)
+            result.extend(subset)
+
+        for subtype in subtype_order:
+            _add_for_subtype(subtype)
+
+        if include_remaining:
+            _add_for_subtype(None)
+
+        return result
+
+    def _set_current_still_candidate_position(self) -> None:
+        if (
+            not self._still_candidates
+            or self._still_format is None
+            or self._still_frame is None
+        ):
+            self._still_candidate_pos = 0
+            return
+
+        key = self._still_candidate_key(self._still_format, self._still_frame)
+        for idx, (fmt, frame) in enumerate(self._still_candidates):
+            if self._still_candidate_key(fmt, frame) == key:
+                self._still_candidate_pos = idx
+                return
+
+        self._still_candidates.insert(0, (self._still_format, self._still_frame))
+        self._still_candidate_pos = 0
 
     def stream(
         self,
@@ -2131,150 +2421,199 @@ class UVCCamera:
     ) -> dict:
         """Probe and commit still-image parameters for a future capture."""
 
-        stream_format: StreamFormat
-        frame: FrameInfo
+        codec_value = codec.lower()
+        explicit_selection = any(
+            value is not None
+            for value in (width, height, format_index, frame_index)
+        )
+        compression_request = compression_index if compression_index and compression_index > 0 else 1
 
+        candidates = self._collect_still_candidates(codec_value)
         if width is not None and height is not None:
-            stream_format, frame = resolve_still_preference(
-                self.interface,
-                width,
-                height,
-                codec=codec,
-            )
-        elif format_index is not None:
-            stream_format, frame = self.select_still_image(
-                format_index=format_index,
-                frame_index=frame_index,
-            )
-        else:
-            stream_format, frame = self.select_still_image(codec=codec)
+            candidates = [
+                item
+                for item in candidates
+                if item[1].width == width and item[1].height == height
+            ]
+        if format_index is not None:
+            candidates = [
+                item for item in candidates if item[0].format_index == format_index
+            ]
+        if frame_index is not None:
+            candidates = [
+                item for item in candidates if item[1].frame_index == frame_index
+            ]
 
-        if not frame.supports_still:
-            raise UVCError("Selected frame does not advertise still-image support")
+        if not candidates:
+            raise UVCError("No still-image capable frames advertised on this interface")
 
+        target_format, target_frame = candidates[0]
+        target_method = 2 if isinstance(target_frame, StillFrameInfo) else 1
         LOG.info(
-            "Configuring still image: fmt_idx=%s frame_idx=%s (%sx%s)",
-            stream_format.format_index,
-            frame.frame_index,
-            frame.width,
-            frame.height,
+            "Configuring still image: fmt_idx=%s frame_idx=%s (%sx%s) method=%s compression=%s",
+            target_format.format_index,
+            target_frame.frame_index,
+            target_frame.width,
+            target_frame.height,
+            target_method,
+            compression_request,
         )
 
-        self._ensure_claimed()
-        info = perform_still_probe_commit(
-            self.device,
-            self.interface_number,
-            stream_format,
-            frame,
-            compression_index=compression_index,
-            do_commit=True,
-        )
+        info = self._configure_specific_still(target_format, target_frame, compression_request)
 
-        payload_hint = (
-            info.get("dwMaxPayloadTransferSize")
-            or info.get("dwMaxVideoFrameSize")
-            or frame.max_frame_size
-            or 0
-        )
-        alt_info = None
-        if payload_hint:
-            alt_info = self.interface.select_alt_for_payload(payload_hint)
-
-        if alt_info is None and self._endpoint_address is None:
-            raise UVCError("Unable to resolve an alternate setting for still capture")
-
-        self._still_format = stream_format
-        self._still_frame = frame
-        negotiated_compression = info.get("bCompressionIndex")
-        self._still_compression_index = (
-            negotiated_compression
-            if isinstance(negotiated_compression, int) and negotiated_compression
-            else compression_index
-        )
-        self._still_payload = int(payload_hint)
-        self._still_alt_info = alt_info
-        self._still_frame_size = (
-            info.get("dwMaxVideoFrameSize")
-            or frame.max_frame_size
-            or (frame.width * frame.height * 2)
-        )
+        self._still_candidates = list(candidates)
+        self._still_allow_fallback = not explicit_selection
+        self._still_requested_compression = self._still_compression_index or compression_request
+        self._still_requested_codec = codec_value
+        self._set_current_still_candidate_position()
 
         return info
 
     def capture_still_image(self, *, timeout_ms: int = 2000) -> CapturedFrame:
         """Trigger and fetch a single still image using the negotiated settings."""
 
-        was_claimed = self._claimed
         if self._still_format is None or self._still_frame is None:
             raise UVCError("Still image parameters not configured; call configure_still_image() first")
 
-        self._ensure_claimed()
+        attempt_index = self._still_candidate_pos
+        visited_keys: Set[Tuple[str, int, int]] = set()
 
-        previous_alt = self._active_alt
-        previous_endpoint = self._endpoint_address
-        previous_payload = self._max_payload
-        previous_format = self._format
-        previous_frame = self._frame
+        while True:
+            current_key = self._still_candidate_key(self._still_format, self._still_frame)
+            if current_key in visited_keys:
+                raise UVCError(
+                    "Still capture exhausted advertised candidates without a usable payload"
+                )
+            visited_keys.add(current_key)
 
-        alt_info = self._still_alt_info
-        if alt_info is not None and alt_info.endpoint_address is None:
-            alt_info = None
+            was_claimed = self._claimed
+            self._ensure_claimed()
 
-        if alt_info is not None:
-            if alt_info.alternate_setting != self._active_alt:
-                try:
-                    self.device.set_interface_altsetting(
-                        interface=self.interface_number,
-                        alternate_setting=alt_info.alternate_setting,
-                    )
-                except usb.core.USBError as exc:
-                    raise UVCError(f"Failed to select still-image alternate setting: {exc}") from exc
-                self._active_alt = alt_info.alternate_setting
-            self._endpoint_address = alt_info.endpoint_address
-            self._max_payload = alt_info.max_packet_size or self._max_payload
+            previous_alt = self._active_alt
+            previous_endpoint = self._endpoint_address
+            previous_payload = self._max_payload
+            previous_format = self._format
+            previous_frame = self._frame
 
-        # Ensure decoding metadata refers to the still frame while we capture.
-        self._format = self._still_format
-        self._frame = self._still_frame
-        original_frame_size: Optional[int] = None
-        if self._frame is not None and self._still_frame_size:
-            original_frame_size = self._frame.max_frame_size
-            self._frame.max_frame_size = self._still_frame_size
+            alt_info = self._still_alt_info
+            if alt_info is not None and alt_info.endpoint_address is None:
+                alt_info = None
 
-        try:
-            _write_control(
-                self.device,
-                SET_CUR,
-                VS_STILL_IMAGE_TRIGGER_CONTROL,
-                self.interface_number,
-                b"\x01",
-            )
+            if alt_info is not None:
+                if alt_info.alternate_setting != self._active_alt:
+                    try:
+                        self.device.set_interface_altsetting(
+                            interface=self.interface_number,
+                            alternate_setting=alt_info.alternate_setting,
+                        )
+                    except usb.core.USBError as exc:
+                        raise UVCError(f"Failed to select still-image alternate setting: {exc}") from exc
+                    self._active_alt = alt_info.alternate_setting
+                self._endpoint_address = alt_info.endpoint_address
+                self._max_payload = alt_info.max_packet_size or self._max_payload
 
-            with contextlib.suppress(usb.core.USBError):
-                if self._endpoint_address is not None:
-                    self.device.clear_halt(self._endpoint_address)
+            # Ensure decoding metadata refers to the still frame while we capture.
+            self._format = self._still_format
+            self._frame = self._still_frame
+            original_frame_size: Optional[int] = None
+            if self._frame is not None and self._still_frame_size:
+                original_frame_size = self._frame.max_frame_size
+                self._frame.max_frame_size = self._still_frame_size
 
-            frame = self.read_frame(timeout_ms=timeout_ms)
-        finally:
-            self._format = previous_format
-            self._frame = previous_frame
-            if self._frame is not None and original_frame_size is not None:
-                self._frame.max_frame_size = original_frame_size
+            frame: Optional[CapturedFrame] = None
+            exc_info: Optional[UVCError] = None
+            try:
+                trigger_value = 0x01
+                if self._still_method == 2:
+                    endpoint_hint = self._still_endpoint_hint
+                    alt_endpoint = self._still_alt_info.endpoint_address if self._still_alt_info else None
+                    if endpoint_hint and endpoint_hint != 0:
+                        trigger_value = 0x02
+                    elif alt_endpoint and alt_endpoint != previous_endpoint:
+                        trigger_value = 0x02
 
-            if alt_info is not None and previous_alt != self._active_alt:
+                _write_control(
+                    self.device,
+                    SET_CUR,
+                    VS_STILL_IMAGE_TRIGGER_CONTROL,
+                    self.interface_number,
+                    bytes([trigger_value]),
+                )
+
                 with contextlib.suppress(usb.core.USBError):
-                    self.device.set_interface_altsetting(
-                        interface=self.interface_number,
-                        alternate_setting=previous_alt,
+                    if self._endpoint_address is not None:
+                        self.device.clear_halt(self._endpoint_address)
+
+                try:
+                    frame = self.read_frame(timeout_ms=timeout_ms, overall_timeout_ms=timeout_ms)
+                except usb.core.USBError as exc:
+                    exc_info = UVCError(f"Still capture failed: {exc}")
+                except UVCError as exc:
+                    exc_info = exc
+            finally:
+                self._format = previous_format
+                self._frame = previous_frame
+                if self._frame is not None and original_frame_size is not None:
+                    self._frame.max_frame_size = original_frame_size
+
+                if alt_info is not None and previous_alt != self._active_alt:
+                    with contextlib.suppress(usb.core.USBError):
+                        self.device.set_interface_altsetting(
+                            interface=self.interface_number,
+                            alternate_setting=previous_alt,
+                        )
+                    self._active_alt = previous_alt
+                    self._endpoint_address = previous_endpoint
+                    self._max_payload = previous_payload
+
+                if not was_claimed:
+                    self._release_interface(reset_alt=False)
+
+            if frame is not None:
+                return frame
+
+            if exc_info is None:
+                raise UVCError("Still capture produced no frame data")
+
+            timed_out = "Timed out waiting for frame" in str(exc_info)
+            if timed_out and self._still_allow_fallback:
+                current_frame = self._still_frame
+                fallback_configured = False
+                while attempt_index + 1 < len(self._still_candidates):
+                    attempt_index += 1
+                    next_fmt, next_frame = self._still_candidates[attempt_index]
+                    LOG.warning(
+                        "Still capture timed out at %sx%s; retrying with %sx%s",
+                        current_frame.width if isinstance(current_frame, (FrameInfo, StillFrameInfo)) else "?",
+                        current_frame.height if isinstance(current_frame, (FrameInfo, StillFrameInfo)) else "?",
+                        next_frame.width,
+                        next_frame.height,
                     )
-                self._active_alt = previous_alt
-                self._endpoint_address = previous_endpoint
-                self._max_payload = previous_payload
+                    try:
+                        info = self._configure_specific_still(
+                            next_fmt,
+                            next_frame,
+                            self._still_compression_index or self._still_requested_compression,
+                        )
+                    except UVCError as cfg_exc:
+                        LOG.warning(
+                            "Fallback still configuration %sx%s failed: %s",
+                            next_frame.width,
+                            next_frame.height,
+                            cfg_exc,
+                        )
+                        continue
+                    self._set_current_still_candidate_position()
+                    attempt_index = self._still_candidate_pos
+                    self._still_requested_compression = self._still_compression_index
+                    LOG.info("Fallback still PROBE/COMMIT info: %s", info)
+                    fallback_configured = True
+                    break
 
-            if not was_claimed:
-                self._release_interface(reset_alt=False)
+                if fallback_configured:
+                    continue
 
-        return frame
+            raise exc_info
 
     # ------------------------------------------------------------------
     # Asynchronous streaming (isochronous transfers via libusb1)
@@ -2517,7 +2856,12 @@ class UVCCamera:
 
         LOG.info("Async stream stopped")
 
-    def read_frame(self, timeout_ms: int = 1000) -> CapturedFrame:
+    def read_frame(
+        self,
+        timeout_ms: int = 1000,
+        *,
+        overall_timeout_ms: Optional[int] = None,
+    ) -> CapturedFrame:
         """Read a single video frame from the streaming endpoint."""
 
         if not self._claimed or self._endpoint_address is None or self._max_payload is None:
@@ -2536,8 +2880,14 @@ class UVCCamera:
         current_fid: Optional[int] = None
         err_seen = False
         packets_seen = 0
+        start_time = time.monotonic()
+        overall_deadline = None
+        if overall_timeout_ms is not None and overall_timeout_ms > 0:
+            overall_deadline = start_time + (overall_timeout_ms / 1000.0)
 
         while True:
+            if overall_deadline is not None and time.monotonic() >= overall_deadline:
+                raise UVCError("Timed out waiting for frame")
             try:
                 packet = self.device.read(
                     self._endpoint_address,
@@ -2546,6 +2896,8 @@ class UVCCamera:
                 )
             except usb.core.USBError as exc:
                 if exc.errno == errno.ETIMEDOUT:
+                    if overall_deadline is not None and time.monotonic() >= overall_deadline:
+                        raise UVCError("Timed out waiting for frame")
                     continue
                 raise
 

@@ -10,6 +10,7 @@ This hybrid approach was designed to solve common issues with complex or "quirky
 - **Robust Streaming Core**: Reliably streams from complex cameras that fail with simpler negotiation methods.
 - **Graceful Kernel Integration**: libusb captures are followed by an automatic USB reset so `/dev/video*` nodes and `uvcvideo` are restored immediately.
 - **Comprehensive Tooling**: Includes CLI scripts for listing device capabilities, grabbing single frames, and launching live previews.
+- **Still Capture Diagnostics**: Quickly audit still-image descriptors and firmware behaviour; the toolkit highlights when devices advertise still support but return unusable payloads.
 - **Decoder-Agnostic**: Provides raw frame data (YUYV, MJPEG), ready to be used with libraries like OpenCV, Pillow, or GStreamer.
 
 ## Core Components
@@ -92,7 +93,7 @@ Unplug and replug the camera to apply the new permissions. Ensure your user is a
 python3 examples/uvc_inspect.py --vid 0x0408 --pid 0x5473 --verbose
 ```
 
-The script uses the new `UVCControlsManager` to print validated controls (including quirk names such as *LED Control*) and can still run probe/commit tests with `--probe-interface`, `--probe-format`, `--commit`, etc.
+The script uses the new `UVCControlsManager` to print validated controls (including quirk names such as *LED Control*) and can still run probe/commit tests with `--probe-interface`, `--probe-format`, `--commit`, etc. Add `--test-still` to try the first advertised still frame for each format (cycling through the published compression indices) and warn when a firmware returns empty payloads despite exposing descriptors.
 
 ### Capture a single frame
 
@@ -176,12 +177,21 @@ python3 examples/uvc_capture_still.py \
     --output still.tiff
 ```
 
-Still-image negotiation relies on the UVC ``VS_STILL_*`` controls.  Many
-firmwares expose the selectors but respond only to a subset of formats or expect
-vendor-specific values, so be prêt à expérimenter (ou capturer les trames USB)
-si votre matériel ignore le déclencheur.  Lorsqu'une image brute est renvoyée,
-le script la stocke en TIFF pour éviter toute compression et conserver la
-profondeur de bits maximale.
+The helper now understands both UVC still-image capture methods. When dedicated
+still descriptors are present (Method 2) the script automatically selects the
+highest-resolution frame if ``--width``/``--height`` are omitted and chooses a
+valid compression index from the descriptor. If ``bmStillSupported`` is set on a
+streaming frame (Method 1) the tool reuses that frame.
+
+⚠️ **Important:** In practice, commodity firmware almost never implements still
+capture correctly. Many cameras expose exhaustive descriptors yet return empty
+payloads (all zeros) or require proprietary commands. Always run
+``uvc_inspect.py --test-still`` on a new device; it cycles through the first
+advertised still frame for each format (and the published compression indices)
+and reports whether any combination yields a usable payload. Treat the result as
+an initial smoke test—if it fails, expect to capture USB traces or rely on the
+vendor stack. Uncompressed frames are stored as TIFF to avoid recompression and
+preserve the original bit depth when a firmware does respond.
 
 ### Microsoft Camera Control XU
 
@@ -241,8 +251,8 @@ The stream iterator handles all PROBE/COMMIT steps, asynchronous transfers, and 
 
 ## Roadmap / To Do
 
-- **Compressed payload support (H.264/H.265/AV1/VP8):** today the library focuses on uncompressed and MJPEG streams; adding decoders and payload negotiation for the modern compressed formats will require parsing their specific payload headers and, in many cases, reverse engineering device behaviour.
-- **UVC still image capture:** initial Method 1 support is available, but broader hardware coverage (compression indices, multi-sensor setups, error handling) still requires work and reverse engineering.
+- **Compressed payload support (H.264/H.265/AV1/VP8):** the toolkit still focuses on uncompressed and MJPEG streams; adding the modern codecs means parsing their payload headers, negotiating format-specific controls, and integrating decoders.
+- **Still-image pipeline hardening:** Method 1 and Method 2 negotiation work, but we still need per-device quirks for multi-sensor rigs, vendor compression indices, and bulk-only endpoints so captures succeed without manual tweaking.
 - **Control coverage & vendor quirks:** even when a control is advertised (for example an IR torch selector), firmwares often expect vendor-specific messages. Mapping them reliably demands per-device investigation or reverse engineering before they can become first-class features in the toolkit.
 
 ## 3. Troubleshooting

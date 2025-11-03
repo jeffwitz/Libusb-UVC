@@ -66,6 +66,20 @@ from ``uvcvideo`` on demand. If you set the environment variable
 run as root). Re-enable auto-detach by unsetting the variable or giving it a
 truthy value.
 
+Still Capture Returns Empty Payloads
+------------------------------------
+
+**Symptom:** ``uvc_capture_still.py`` succeeds but the saved file contains only
+zeros or fails to decode; ``uvc_inspect.py --test-still`` reports ``len=…
+head=00 00 …``.
+
+**Resolution:** This behaviour is unfortunately common—many cameras expose
+still-image descriptors without wiring the firmware. Use ``uvc_inspect.py
+--test-still`` as a quick smoke test whenever you connect a new device; the
+command cycles through the first advertised still frame per format and every
+published compression index. If every combination fails, assume the camera
+requires proprietary commands or OEM software to capture stills.
+
 Further Help
 ------------
 

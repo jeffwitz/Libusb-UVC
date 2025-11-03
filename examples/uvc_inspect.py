@@ -7,7 +7,7 @@ import argparse
 import logging
 import pathlib
 import sys
-from typing import Optional
+from typing import Dict, Optional
 
 import usb.core
 import usb.util
@@ -32,6 +32,11 @@ try:
         list_streaming_interfaces,
         probe_streaming_interface,
         select_format_and_frame,
+        CodecPreference,
+        CapturedFrame,
+        VS_FORMAT_MJPEG,
+        VS_FORMAT_UNCOMPRESSED,
+        StreamingInterface,
     )
 except ImportError:  # pragma: no cover
     sys.path.insert(0, str(ROOT / "src"))
@@ -53,6 +58,11 @@ except ImportError:  # pragma: no cover
         list_streaming_interfaces,
         probe_streaming_interface,
         select_format_and_frame,
+        CodecPreference,
+        CapturedFrame,
+        VS_FORMAT_MJPEG,
+        VS_FORMAT_UNCOMPRESSED,
+        StreamingInterface,
     )
 
 LOG = logging.getLogger("inspect_device")
@@ -136,7 +146,11 @@ def print_controls(dev: usb.core.Device) -> None:
             print(f"      ({', '.join(details)})")
 
 
-def print_streaming(dev: usb.core.Device) -> None:
+def print_streaming(
+    dev: usb.core.Device,
+    *,
+    still_tests: Optional[dict] = None,
+) -> None:
     interfaces = list_streaming_interfaces(dev)
     for interface in interfaces.values():
         print(f"  Interface {interface.interface_number}:")
@@ -149,6 +163,23 @@ def print_streaming(dev: usb.core.Device) -> None:
                     f"      Frame {frame.frame_index}: {frame.width}x{frame.height} "
                     f"max={frame.max_frame_size} bytes fps={fps_desc}"
                 )
+            if fmt.still_frames:
+                print("      Still-image frames:")
+                for still in fmt.still_frames:
+                    endpoint = (
+                        "stream"
+                        if still.endpoint_address in (None, 0)
+                        else f"0x{still.endpoint_address:02x}"
+                    )
+                    comps = ", ".join(str(idx) for idx in still.compression_indices) or "-"
+                    print(
+                        f"        #{still.frame_index}: {still.width}x{still.height} "
+                        f"endpoint={endpoint} compression={comps}"
+                    )
+        if still_tests:
+            tracker = still_tests.get(interface.interface_number)
+            if tracker and tracker.get("message"):
+                print(f"    Still capture test: {tracker['message']}")
         print("    Alternate settings:")
         for alt in interface.alt_settings:
             endpoint = f"0x{alt.endpoint_address:02x}" if alt.endpoint_address is not None else "-"
@@ -190,6 +221,127 @@ def run_probe(dev: usb.core.Device, args) -> None:
         print(f"    {key}: {result[key]}")
 
 
+def _payload_summary(frame: CapturedFrame) -> str:
+    head = frame.payload[:16]
+    return " ".join(f"{byte:02x}" for byte in head)
+
+
+def _is_valid_payload(frame: CapturedFrame) -> bool:
+    if not frame.payload:
+        return False
+    subtype = frame.format.subtype
+    if subtype == VS_FORMAT_MJPEG:
+        return frame.payload.startswith(b"\xff\xd8")
+    if subtype == VS_FORMAT_UNCOMPRESSED:
+        return any(frame.payload)
+    return True
+
+
+def _still_combinations(interface: StreamingInterface) -> List[tuple]:
+    combos: List[tuple] = []
+
+    def area(width: int, height: int) -> int:
+        return width * height
+
+    # Method 2 descriptors first (highest resolution to lowest)
+    for fmt in interface.formats:
+        ordered = sorted(fmt.still_frames, key=lambda frame: area(frame.width, frame.height), reverse=True)
+        if ordered:
+            still = ordered[0]
+            comps = still.compression_indices or [1]
+            combos.append(("method2", fmt, still, comps))
+
+    # Method 1 fallback (streaming frames with bmStillSupported)
+    for fmt in interface.formats:
+        frames = [frame for frame in fmt.frames if frame.supports_still]
+        if frames:
+            frame = max(frames, key=lambda item: area(item.width, item.height))
+            combos.append(("method1", fmt, frame, [1]))
+
+    return combos
+
+
+def test_still_capture(
+    *,
+    vid: int,
+    pid: int,
+    device_index: int,
+    interfaces: Dict[int, StreamingInterface],
+) -> Dict[int, Dict[str, str]]:
+    results: Dict[int, Dict[str, str]] = {}
+
+    for interface_number in sorted(interfaces.keys()):
+        tracker: Dict[str, str] = {}
+        results[interface_number] = tracker
+        interface = interfaces[interface_number]
+        combos = _still_combinations(interface)
+        if not combos:
+            tracker["message"] = "No still-image descriptors advertised"
+            continue
+        try:
+            with UVCCamera.open(
+                vid=vid,
+                pid=pid,
+                device_index=device_index,
+                interface=interface_number,
+            ) as camera:
+                attempts = 0
+                success_msg: Optional[str] = None
+                last_issue: Optional[str] = None
+
+                for method, fmt, frame_desc, comp_list in combos:
+                    for comp in comp_list or [1]:
+                        attempts += 1
+                        desc = (
+                            f"method={method} fmt={fmt.format_index} frame={frame_desc.frame_index} "
+                            f"{frame_desc.width}x{frame_desc.height} comp={comp}"
+                        )
+                        try:
+                            info = camera.configure_still_image(
+                                format_index=fmt.format_index,
+                                frame_index=frame_desc.frame_index,
+                                compression_index=comp,
+                            )
+                            setattr(camera, "_still_allow_fallback", False)
+                        except Exception as exc:
+                            last_issue = f"{desc} configure failed: {exc}"
+                            continue
+
+                        try:
+                            frame = camera.capture_still_image(timeout_ms=2000)
+                        except Exception as exc:
+                            last_issue = f"{desc} capture failed: {exc}"
+                            continue
+
+                        if _is_valid_payload(frame):
+                            success_msg = (
+                                f"Still capture OK ({desc}) len={len(frame.payload)} "
+                                f"subtype=0x{frame.format.subtype:02x} head={_payload_summary(frame)}"
+                            )
+                            break
+                        else:
+                            last_issue = (
+                                f"{desc} returned unusable payload len={len(frame.payload)} "
+                                f"subtype=0x{frame.format.subtype:02x} head={_payload_summary(frame)}"
+                            )
+                    if success_msg:
+                        break
+
+                if success_msg:
+                    tracker["message"] = success_msg + " (first working combination)"
+                else:
+                    if last_issue:
+                        tracker["message"] = (
+                            f"All still combinations failed after {attempts} attempts; last issue: {last_issue}"
+                        )
+                    else:
+                        tracker["message"] = "All still combinations failed"
+        except Exception as exc:  # pragma: no cover - defensive
+            tracker["message"] = f"Still capture setup failed: {exc}"
+
+    return results
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Inspect UVC cameras using libusb")
     parser.add_argument("--vid", type=lambda s: int(s, 0), help="Vendor ID (hex ok)")
@@ -201,25 +353,38 @@ def main() -> int:
     parser.add_argument("--commit", action="store_true", help="Send COMMIT after PROBE")
     parser.add_argument("--alt-setting", type=int, help="Alt setting to force on the VS interface")
     parser.add_argument("-v", "--verbose", action="store_true")
+    parser.add_argument("--test-still", action="store_true", help="Attempt to capture a still frame for each VS interface")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO)
 
-    devices = list(find_uvc_devices())
-    if args.vid is not None and args.pid is not None:
-        devices = [d for d in devices if d.idVendor == args.vid and d.idProduct == args.pid]
+    devices = find_uvc_devices(args.vid, args.pid)
 
     if not devices:
         print("No UVC devices found.")
         return 1
 
-    for dev in devices:
+    for idx, dev in enumerate(devices):
         print(f"Device: {describe_device(dev)}")
+
+        stream_map = list_streaming_interfaces(dev)
+        still_results = None
+        if args.test_still:
+            still_results = test_still_capture(
+                vid=dev.idVendor,
+                pid=dev.idProduct,
+                device_index=idx,
+                interfaces=stream_map,
+            )
+
         print("\n--- Video Streaming (VS) Interfaces ---")
-        print_streaming(dev)
+        print_streaming(dev, still_tests=still_results)
 
         print("\n--- Video Control (VC) Interface & Controls ---")
-        print_controls(dev)
+        try:
+            print_controls(dev)
+        except usb.core.USBError as exc:
+            print(f"  Unable to enumerate VC controls: {exc}")
 
         if args.probe_interface is not None:
             print("\n--- Probe/Commit Test ---")

@@ -42,7 +42,11 @@ sends ``SET_CUR`` requests while keeping the stream running.
 
 Introspect the camera's streaming descriptors and Video Control units. The
 output lists formats, frames, alternate settings, and control metadata,
-combining quirk definitions with live ``GET_*`` queries.
+combining quirk definitions with live ``GET_*`` queries. Add ``--test-still``
+to run a quick “smoke test” on still capture: the helper takes the first
+advertised still frame for each format, cycles through the published
+compression indices, and reports whether any combination returns a usable
+payload.
 
 ``uvc_ir_inspect.py``
 ---------------------
@@ -55,12 +59,30 @@ Use ``--interface`` to select the IR streaming interface number.
 ``uvc_capture_still.py``
 ------------------------
 
-Negotiate the UVC still-image controls and trigger a single capture.  Support
-depends heavily on the firmware: even when the still selectors are exposed,
-devices often expect vendor-specific compression indices or control sequences.
-Use this script as a starting point for experimentation and be ready to gather
-USB traces if your hardware ignores the trigger.  The helper stores
-uncompressed payloads as TIFF to avoid precision loss.
+Negotiate the UVC still-image controls and trigger a single capture. The script
+now understands both capture methods defined by the specification:
+
+* **Method 1** — reuse the streaming frame descriptor when ``bmStillSupported``
+  is set (mostly older devices).
+* **Method 2** — honour dedicated still-image frame descriptors that point to a
+  separate endpoint or alternate setting. The helper automatically falls back
+  to the highest-resolution still frame when ``--width``/``--height`` are
+  omitted and picks a valid compression index advertised by the descriptor.
+
+You can inspect the advertised still frames via ``uvc_inspect.py`` — look for
+the new ``Still-image frames`` section — and then run::
+
+   python3 examples/uvc_capture_still.py --vid 0x1b3f --pid 0x1167 --output still.tiff
+
+Support still depends heavily on the firmware: some devices ignore the trigger
+without additional vendor messages or require experimentation with compression
+indices. The script stores uncompressed payloads as TIFF to preserve bit depth
+and falls back to raw dumps when conversion fails. In practice it is **very
+common** for cameras to advertise every still resolution yet return empty
+payloads. Always start with ``uvc_inspect.py --test-still``; it exercises the
+first still frame for each format (and iterates through the published
+compression indices) so you can quickly determine whether the firmware ever
+produces usable data.
 
 ``uvc_ir_torch_demo.py``
 ------------------------
@@ -98,9 +120,9 @@ Future Work
 - **Compressed payload codecs (H.264/H.265/AV1/VP8)**: support is not yet
   implemented; handling those streams would require parsing their specific UVC
   payload headers and integrating suitable decoders.
-- **UVC still-image capture**: basic Method 1 support exists, but additional
-  work is needed to cover device-specific compression indices, multiple
-  sensors, and error handling.
+- **UVC still-image capture**: Method 1 and Method 2 negotiation work, but
+  completing the feature still demands per-device testing (multiple sensors,
+  proprietary compression settings, bulk endpoints).
 - **Vendor-specific controls**: even when a selector is advertised, many
   firmwares only respond to proprietary messages.  Completing those features
   demands reverse engineering or documentation from the manufacturer.
