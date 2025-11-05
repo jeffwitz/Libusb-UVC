@@ -468,13 +468,17 @@ class CapturedFrame:
     sequence: int = 0
 
     _rgb_cache: Optional[object] = dataclasses.field(default=None, init=False, repr=False)
+    decoded: Optional[object] = dataclasses.field(default=None, repr=False)
 
     def to_bytes(self) -> bytes:
         return bytes(self.payload)
 
     def to_rgb(self):
         if self._rgb_cache is None:
-            self._rgb_cache = decode_to_rgb(self.payload, self.format, self.frame)
+            if self.decoded is not None:
+                self._rgb_cache = self.decoded
+            else:
+                self._rgb_cache = decode_to_rgb(self.payload, self.format, self.frame)
         return self._rgb_cache
 
     def to_bgr(self):
@@ -1433,6 +1437,7 @@ def perform_still_probe_commit(
 
 
 
+from .decoders import create_decoder_backend, DecoderUnavailable
 from .uvc_async import IsoConfig, UVCPacketStream, InterruptConfig, InterruptListener
 class UVCCamera:
     """Minimal helper to configure a streaming interface and fetch frames."""
@@ -2872,6 +2877,7 @@ class UVCCamera:
             self._format is not None
             and (
                 self._format.subtype == VS_FORMAT_MJPEG
+                or self._format.subtype == VS_FORMAT_FRAME_BASED
                 or "MJPG" in (self._format.description or "").upper()
             )
         ):
@@ -2932,12 +2938,15 @@ class UVCCamera:
                     and not err_seen
                     and (expected_size is None or len(frame_bytes) == expected_size)
                 ):
+                    payload_bytes = bytes(frame_bytes)
+                    decoded = self._decode_payload_once(payload_bytes)
                     return CapturedFrame(
-                        payload=bytes(frame_bytes),
+                        payload=payload_bytes,
                         format=self._format,
                         frame=self._frame,
                         fid=current_fid,
                         pts=None,
+                        decoded=decoded,
                     )
                 frame_bytes.clear()
                 current_fid = fid
@@ -2981,12 +2990,15 @@ class UVCCamera:
             if flags & BH_PTS and header_len >= 6:
                 pts = int.from_bytes(packet[2:6], "little")
 
+            payload_bytes = bytes(frame_bytes)
+            decoded = self._decode_payload_once(payload_bytes)
             result = CapturedFrame(
-                payload=bytes(frame_bytes),
+                payload=payload_bytes,
                 format=self._format,
                 frame=self._frame,
                 fid=current_fid,
                 pts=pts,
+                decoded=decoded,
             )
 
             frame_bytes.clear()
@@ -3093,7 +3105,26 @@ def _parse_probe_payload(payload: bytes) -> dict:
     interval = result.get("dwFrameInterval")
     if interval:
         result["frame_rate_hz"] = _interval_to_hz(interval)
-    return result
+        return result
+
+    def _decode_payload_once(self, payload: bytes) -> Optional[object]:
+        if self._format is None or self._format.subtype != VS_FORMAT_FRAME_BASED:
+            return None
+        try:
+            decoder = create_decoder_backend(self._format.description)
+        except DecoderUnavailable:
+            return None
+        try:
+            frames = decoder.decode_packet(payload)
+            frames.extend(decoder.flush())
+        except Exception as exc:  # pragma: no cover - backend dependent
+            LOG.warning("On-demand decoder failed: %s", exc)
+            return None
+        if not frames:
+            return None
+        if len(frames) > 1:
+            LOG.debug("One-shot decoder produced %s frames; returning the first one", len(frames))
+        return frames[0]
 
 
 class FrameStream:
@@ -3137,11 +3168,22 @@ class FrameStream:
         self._frame_error = False
         self._current_pts: Optional[int] = None
 
+        is_mjpeg = stream_format.subtype == VS_FORMAT_MJPEG or "MJPG" in stream_format.description.upper()
+        is_frame_based = stream_format.subtype == VS_FORMAT_FRAME_BASED
         self._expected_size = (
             None
-            if stream_format.subtype == VS_FORMAT_MJPEG or "MJPG" in stream_format.description.upper()
+            if is_mjpeg or is_frame_based
             else frame.max_frame_size or (frame.width * frame.height * 2)
         )
+
+        self._decoder = None
+        self._decoder_failed = False
+        if is_frame_based:
+            try:
+                self._decoder = create_decoder_backend(stream_format.description)
+                LOG.debug("Using decoder backend %s for %s", type(self._decoder).__name__, stream_format.description)
+            except DecoderUnavailable as exc:
+                LOG.warning("No decoder backend available for %s: %s", stream_format.description, exc)
 
     def __enter__(self) -> "FrameStream":
         negotiation = self._camera.configure_stream(
@@ -3225,6 +3267,21 @@ class FrameStream:
             except queue.Full:
                 LOG.debug("FrameStream queue full; dropping frame %s", frame.sequence)
 
+    def _decode_payload(self, payload: bytes) -> Optional[object]:
+        if not self._decoder or self._decoder_failed:
+            return None
+        try:
+            frames = self._decoder.decode_packet(payload)
+        except Exception as exc:  # pragma: no cover - backend dependent
+            LOG.warning("Decoder backend %s failed: %s", type(self._decoder).__name__, exc)
+            self._decoder_failed = True
+            return None
+        if not frames:
+            return None
+        if len(frames) > 1:
+            LOG.debug("Decoder produced %s frames; using the first one", len(frames))
+        return frames[0]
+
     def _finalize_frame(self, reason: str) -> None:
         if self._current_fid is None:
             return
@@ -3234,6 +3291,7 @@ class FrameStream:
                 self._skip_initial -= 1
             else:
                 self._sequence += 1
+                decoded = self._decode_payload(bytes(self._frame_bytes))
                 frame = CapturedFrame(
                     payload=bytes(self._frame_bytes),
                     format=self._format,
@@ -3242,6 +3300,7 @@ class FrameStream:
                     pts=self._current_pts,
                     timestamp=time.time(),
                     sequence=self._sequence,
+                    decoded=decoded,
                 )
                 LOG.debug(
                     "FrameStream accepted frame #%s (reason=%s size=%s)",
