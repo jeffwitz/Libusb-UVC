@@ -12,6 +12,12 @@ from abc import ABC, abstractmethod
 from typing import Iterable, List, Optional
 
 import logging
+import threading
+
+try:  # Optional dependency for array conversion when using backends
+    import numpy as _np  # type: ignore
+except Exception:  # pragma: no cover - optional dependency
+    _np = None
 
 LOG = logging.getLogger(__name__)
 
@@ -41,22 +47,162 @@ class DecoderBackend(ABC):
 
 
 class _GStreamerDecoder(DecoderBackend):
-    """GStreamer-based backend (placeholder until fully implemented)."""
+    """GStreamer-based backend for MJPEG and, in the future, other codecs."""
 
-    def __init__(self, format_name: str) -> None:  # pragma: no cover - not exercised yet
+    def __init__(self, format_name: str) -> None:  # pragma: no cover - optional dependency
         super().__init__(format_name)
+        if _np is None:
+            raise DecoderUnavailable("numpy is required for the GStreamer backend")
+
         try:
             import gi  # type: ignore
 
             gi.require_version("Gst", "1.0")
-            from gi.repository import Gst  # noqa: F401  # type: ignore
+            from gi.repository import Gst, GLib  # type: ignore
         except (ImportError, ValueError) as exc:
             raise DecoderUnavailable("GStreamer (python-gi) is not available") from exc
 
-        raise DecoderUnavailable("GStreamer backend not implemented yet")
+        self._Gst = Gst
+        self._GLib = GLib
+        Gst.init(None)
 
-    def decode_packet(self, packet: bytes) -> List[object]:  # pragma: no cover
-        raise DecoderUnavailable("GStreamer backend not implemented yet")
+        try:
+            self._pipeline = Gst.parse_launch(
+                "appsrc name=src is-live=true format=time do-timestamp=true "
+                "! jpegdec ! videoconvert ! video/x-raw,format=RGB "
+                "! appsink name=sink sync=false drop=true max-buffers=1"
+            )
+        except GLib.Error as exc:
+            raise DecoderUnavailable(f"Failed to create GStreamer pipeline: {exc}") from exc
+
+        self._appsrc = self._pipeline.get_by_name("src")
+        self._appsink = self._pipeline.get_by_name("sink")
+        if self._appsrc is None or self._appsink is None:
+            raise DecoderUnavailable("GStreamer pipeline is missing required elements")
+
+        self._appsink.set_property("emit-signals", False)
+
+        caps = Gst.Caps.from_string("image/jpeg")
+        self._appsrc.set_property("caps", caps)
+
+        self._lock = threading.Lock()
+        self._timestamp = 0
+        self._frame_duration = Gst.SECOND // 30  # default, adjusted dynamically when available
+        self._timeout_ns = int(0.5 * Gst.SECOND)
+
+        state_change = self._pipeline.set_state(Gst.State.PLAYING)
+        if state_change == Gst.StateChangeReturn.FAILURE:
+            self.close()
+            raise DecoderUnavailable("Failed to start GStreamer pipeline")
+
+    def _build_buffer(self, packet: bytes):
+        buf = self._Gst.Buffer.new_allocate(None, len(packet), None)
+        buf.fill(0, packet)
+        buf.pts = self._timestamp
+        buf.dts = self._timestamp
+        buf.duration = self._frame_duration
+        self._timestamp += self._frame_duration
+        return buf
+
+    def _pull_sample(self, timeout_ns: int):
+        try:
+            sample = self._appsink.emit("try-pull-sample", timeout_ns)
+        except AttributeError:
+            pull_try = getattr(self._appsink, "try_pull_sample", None)
+            if pull_try is not None:
+                return pull_try(timeout_ns)
+            pull = getattr(self._appsink, "pull_sample", None)
+            if pull is not None:
+                return pull()
+            sample = None
+        return sample
+
+    def decode_packet(self, packet: bytes) -> List[object]:  # pragma: no cover - gst optional
+        with self._lock:
+            if self._pipeline is None:
+                return []
+
+            buf = self._build_buffer(packet)
+            flow_ret = self._appsrc.emit("push-buffer", buf)
+            if flow_ret != self._Gst.FlowReturn.OK:
+                LOG.debug("GStreamer push-buffer returned %s", flow_ret)
+                return []
+
+            sample = self._pull_sample(self._timeout_ns)
+            if sample is None:
+                return []
+
+            try:
+                caps = sample.get_caps()
+                structure = caps.get_structure(0) if caps and caps.get_size() else None
+                width = structure.get_value("width") if structure else None
+                height = structure.get_value("height") if structure else None
+                if not width or not height:
+                    return []
+
+                buffer = sample.get_buffer()
+                success, map_info = buffer.map(self._Gst.MapFlags.READ)
+                if not success:
+                    return []
+                try:
+                    array = _np.frombuffer(map_info.data, dtype=_np.uint8)
+                    try:
+                        array = array.reshape((height, width, 3))
+                    except ValueError:
+                        return []
+                    frame = array.copy()
+                finally:
+                    buffer.unmap(map_info)
+            finally:
+                sample = None
+
+        return [frame]
+
+    def flush(self) -> List[object]:  # pragma: no cover - gst optional
+        frames: List[object] = []
+        if self._appsink is None:
+            return frames
+        while True:
+            sample = self._pull_sample(0)
+            if sample is None:
+                break
+            try:
+                caps = sample.get_caps()
+                structure = caps.get_structure(0) if caps and caps.get_size() else None
+                width = structure.get_value("width") if structure else None
+                height = structure.get_value("height") if structure else None
+                if not width or not height:
+                    continue
+                buffer = sample.get_buffer()
+                success, map_info = buffer.map(self._Gst.MapFlags.READ)
+                if not success:
+                    continue
+                try:
+                    array = _np.frombuffer(map_info.data, dtype=_np.uint8)
+                    try:
+                        array = array.reshape((height, width, 3))
+                    except ValueError:
+                        continue
+                    frames.append(array.copy())
+                finally:
+                    buffer.unmap(map_info)
+            finally:
+                sample = None
+        return frames
+
+    def close(self) -> None:  # pragma: no cover - gst optional
+        with self._lock:
+            if self._pipeline is not None:
+                self._pipeline.set_state(self._Gst.State.NULL)
+                self._pipeline = None
+                self._appsrc = None
+                self._appsink = None
+
+    def __del__(self):  # pragma: no cover - best-effort cleanup
+        try:
+            self.close()
+        except Exception:
+            pass
 
 
 class _PyAVDecoder(DecoderBackend):
