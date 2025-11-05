@@ -23,7 +23,9 @@ python -m pytest tests/test_controls.py
 
 The tests load the sample profile located in `tests/data/` and ensure that the
 control manager interacts with the emulator exclusively through mock PyUSB
-objects.
+objects.  Assertions cover both the high-level enumeration and the raw
+``vc_ctrl_get`` / ``vc_ctrl_set`` helpers so that round-trips are validated at
+every layer.
 
 ## Running the integration tests
 

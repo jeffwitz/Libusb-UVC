@@ -272,9 +272,17 @@ The unit suite relies solely on the JSON-driven emulator located in
 `tests/uvc_emulator.py`.  It exercises the public control APIs through PyUSB
 mocks and runs quickly on any machine:
 
-```bash
-python -m pytest tests/test_controls.py
-```
+
+``tests/test_controls.py`` exercises the control-management stack end to end:
+
+* parses the sample JSON profile via :class:`tests.uvc_emulator.UvcEmulatorLogic`
+* drives :class:`libusb_uvc.UVCControlsManager` through a PyUSB mock
+* verifies that enumerated controls match the profile and that synthetic values
+  round-trip through :func:`libusb_uvc.vc_ctrl_get` / :func:`libusb_uvc.vc_ctrl_set`
+
+Run it with::
+
+   python -m pytest tests/test_controls.py
 
 ### Integration tests (USB gadget)
 
