@@ -3,6 +3,11 @@
 Welcome to libusb-uvc's documentation!
 ======================================
 
+.. image:: _static/logo.svg
+   :alt: Libusb-UVC logo
+   :align: center
+   :width: 40%
+
 Libusb-UVC is a lightweight toolkit built on top of ``libusb1`` and ``pyusb`` to
 provide a reliable, Pythonic interface to USB Video Class (UVC) devices. This
 documentation combines getting started guides, conceptual explanations, and API
@@ -42,4 +47,3 @@ Indices and tables
 * :ref:`genindex`
 * :ref:`modindex`
 * :ref:`search`
-

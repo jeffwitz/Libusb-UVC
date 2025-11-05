@@ -1,5 +1,9 @@
 # Libusb-UVC: A Robust Python UVC Streaming Toolkit
 
+<p align="center">
+  <img src="docs/_static/logo.svg" alt="Libusb-UVC logo" width="280" />
+</p>
+
 Libusb-UVC is a lightweight Python toolkit for inspecting and streaming from UVC (USB Video Class) cameras. It provides a robust, low-level streaming core built on `libusb1` while leveraging the high-level convenience of `PyUSB` for device discovery and descriptor parsing.
 
 This hybrid approach was designed to solve common issues with complex or "quirky" camera firmwares. The entire critical streaming sequence—PROBE/COMMIT negotiation, alternate setting selection, and isochronous transfers—is managed on a single `libusb1` handle, mirroring the stable behavior of the Linux kernel's `uvcvideo` driver.
