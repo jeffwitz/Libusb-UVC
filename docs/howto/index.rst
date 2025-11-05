@@ -5,6 +5,31 @@ The recipes in this section provide step-by-step instructions for common tasks
 when working with libusb-uvc. Each example builds on the core API documented
 elsewhere.
 
+.. toctree::
+   :maxdepth: 1
+
+   gadget_testing
+
+Run Unit Tests
+--------------
+
+1. Install the project in editable mode (or ensure :mod:`pytest` is available)::
+
+      python3 -m pip install -e .[tests]
+
+2. Execute the emulator-backed unit suite::
+
+      python3 -m pytest tests/test_controls.py
+
+USB Gadget Integration Tests
+----------------------------
+
+For full end-to-end coverage, configure a virtual camera via FunctionFS and the
+``dummy_hcd`` module.  Detailed Debian instructions live in :doc:`gadget_testing`.
+Once the gadget is present, enable the tests by exporting
+``LIBUSB_UVC_ENABLE_GADGET_TESTS=1`` and run ``python -m pytest
+tests/test_integration.py``.
+
 Disable Auto Exposure
 ---------------------
 
@@ -56,4 +81,3 @@ Next Steps
 - Browse :doc:`../examples` to see the recipes applied in full scripts.
 - Dive into :doc:`../api` for low-level control helpers and asynchronous
   streaming primitives.
-

@@ -263,3 +263,46 @@ The stream iterator handles all PROBE/COMMIT steps, asynchronous transfers, and 
 - **V4L2 missing after capture:** The library now issues `device.reset()` when a libusb stream stops. If you disabled this behaviour, call `camera.stop_streaming()` or `camera.reset_device()` before returning control to V4L2 applications.
 - **VC auto-detach:** By default the VC interface is temporarily detached so user-space control transfers work even when `uvcvideo` is active. Set `LIBUSB_UVC_AUTO_DETACH_VC=0` to disable this and handle detaching yourself.
 - **Useful extras:** Install `[opencv]`, `[pillow]`, or `[full]` extras if you want MJPEG previews, Matplotlib demos, or frame conversions out of the box.
+ 
+## 4. Testing & CI
+
+### Unit tests
+
+The unit suite relies solely on the JSON-driven emulator located in
+`tests/uvc_emulator.py`.  It exercises the public control APIs through PyUSB
+mocks and runs quickly on any machine:
+
+```bash
+python -m pytest tests/test_controls.py
+```
+
+### Integration tests (USB gadget)
+
+For end-to-end validation libusb-uvc can talk to a fully virtual camera
+exposed via FunctionFS.  Preparing the gadget requires a Linux host with the
+`dummy_hcd` and `libcomposite` modules.  See
+[docs/howto/gadget_testing.rst](docs/howto/gadget_testing.rst) for a
+Debian-oriented recipe.  Once the gadget is configured, enable the tests and
+point them at the FunctionFS mount point:
+
+```bash
+export LIBUSB_UVC_ENABLE_GADGET_TESTS=1
+# optional
+export LIBUSB_UVC_FFS_PATH=/dev/ffs/uvc
+python -m pytest tests/test_integration.py
+```
+
+### Continuous integration
+
+In CI environments we recommend running the unit tests on every change and
+gating the gadget suite behind the `LIBUSB_UVC_ENABLE_GADGET_TESTS` flag.  A
+typical workflow is:
+
+1. Install the project in editable mode along with testing extras.
+2. Run `python -m pytest tests/test_controls.py` unconditionally.
+3. When the runner provides `dummy_hcd` support, export the environment
+   variables above and execute the integration tests.  Otherwise they are
+   automatically skipped.
+
+Additional details – including sample gadget descriptors – live in
+`tests/README.md`.
