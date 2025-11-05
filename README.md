@@ -31,8 +31,13 @@ This hybrid approach was designed to solve common issues with complex or "quirky
 sudo apt-get install -y python3 python3-pip libusb-1.0-0 v4l-utils
 ```
 
-For the MJPEG live preview, you will also need GStreamer packages:
-`sudo apt-get install -y python3-gi gir1.2-gst-1.0 gstreamer1.0-plugins-good`
+For the optional decoding backends install the multimedia stack. On Debian/Ubuntu::
+
+    sudo apt-get install -y \
+        python3-gi gir1.2-gst-1.0 gir1.2-gst-plugins-base-1.0 \
+        gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-libav \
+        libavformat-dev libavcodec-dev libavdevice-dev libavutil-dev \
+        libavfilter-dev libswscale-dev pkg-config
 
 ### Python Environment
 
@@ -41,7 +46,7 @@ Use the provided `pyproject.toml` to install the library (and optionally the exa
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -e .[full]   # "full" installs OpenCV and Pillow for the examples
+pip install -e .[full]   # "full" installs OpenCV, Pillow, PyAV, and PyGObject
 ```
 
 ### Documentation

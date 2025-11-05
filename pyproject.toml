@@ -24,7 +24,14 @@ dependencies = [
 [project.optional-dependencies]
 opencv = ["opencv-python>=4.5"]
 pillow = ["Pillow>=9.0"]
-full = ["opencv-python>=4.5", "Pillow>=9.0"]
+pyav = ["av>=11.0.0"]
+gstreamer = ["PyGObject>=3.44.0"]
+full = [
+    "opencv-python>=4.5",
+    "Pillow>=9.0",
+    "av>=11.0.0",
+    "PyGObject>=3.44.0",
+]
 docs = ["sphinx>=7.0", "sphinx-rtd-theme>=1.3"]
 
 [tool.setuptools]

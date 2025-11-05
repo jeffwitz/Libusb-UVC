@@ -14,9 +14,9 @@ install the project in editable mode so that the example scripts are available::
    source .venv/bin/activate
    pip install -e .[full]
 
-The ``full`` extra installs OpenCV and Pillow, which enables the MJPEG preview
-and single-frame helpers. If you only need device introspection or custom
-integrations you can omit the extra.
+The ``full`` extra installs OpenCV, Pillow, PyAV, and the PyGObject bindings for
+GStreamer, enabling the bundled preview and decoding helpers. If you only need
+device introspection or custom integrations you can omit the extra.
 
 System Dependencies
 -------------------
@@ -25,9 +25,14 @@ Install the USB libraries and V4L tooling commonly required on Linux::
 
    sudo apt-get install -y python3 python3-pip libusb-1.0-0 v4l-utils
 
-For the optional MJPEG preview window, also install GStreamer bindings::
+For the optional decoder backends, add the multimedia stack (GStreamer and the
+FFmpeg development headers used by PyAV)::
 
-   sudo apt-get install -y python3-gi gir1.2-gst-1.0 gstreamer1.0-plugins-good
+   sudo apt-get install -y \
+       python3-gi gir1.2-gst-1.0 gir1.2-gst-plugins-base-1.0 \
+       gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-libav \
+       libavformat-dev libavcodec-dev libavdevice-dev libavutil-dev \
+       libavfilter-dev libswscale-dev pkg-config
 
 Building Distribution Artifacts
 -------------------------------
