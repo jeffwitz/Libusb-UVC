@@ -61,6 +61,7 @@ def test_frame_stream_mjpeg_auto_skips_decoder(monkeypatch):
         called = True
         raise AssertionError("Decoder should not be created for MJPEG in auto mode")
 
+    monkeypatch.setattr(uvc.core, "create_decoder_backend", fake_backend)
     monkeypatch.setattr(uvc, "create_decoder_backend", fake_backend)
 
     fmt = _make_stream_format(VS_FORMAT_MJPEG, "MJPG")
@@ -102,6 +103,7 @@ def test_frame_stream_mjpeg_with_explicit_decoder(monkeypatch):
         captured["preference"] = list(preference) if preference else None
         return DummyBackend()
 
+    monkeypatch.setattr(uvc.core, "create_decoder_backend", fake_backend)
     monkeypatch.setattr(uvc, "create_decoder_backend", fake_backend)
 
     fmt = _make_stream_format(VS_FORMAT_MJPEG, "MJPEG")
@@ -145,6 +147,7 @@ def test_frame_stream_installs_requested_decoder(monkeypatch):
         captured["preference"] = list(preference) if preference else None
         return DummyBackend()
 
+    monkeypatch.setattr(uvc.core, "create_decoder_backend", fake_backend)
     monkeypatch.setattr(uvc, "create_decoder_backend", fake_backend)
 
     fmt = _make_stream_format(VS_FORMAT_FRAME_BASED, "H.264")

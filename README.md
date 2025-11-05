@@ -222,7 +222,7 @@ fields explicitly for a VID/PID-specific quirk.
 ```python
 import usb.core
 
-from libusb_uvc import UVCCamera, CodecPreference, UVCError  # or: from uvc_usb import ... (legacy shim)
+   from libusb_uvc import UVCCamera, CodecPreference, UVCError
 
 with UVCCamera.open(vid=0x0408, pid=0x5473, interface=1) as cam:
     controls = {ctrl.name: ctrl for ctrl in cam.enumerate_controls(refresh=True)}
