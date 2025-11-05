@@ -145,11 +145,13 @@ python3 examples/uvc_capture_video.py \
 `UVCCamera.stream()` feeds a frame iterator; pressing `q`/`ESC` still stops the preview. The device is reset on exit, so a subsequent `mplayer tv:// -tv driver=v4l2:device=/dev/video0` continues to work without unplugging the camera.
 
 Need to exercise the new decoder plumbing even on a MJPEG-only camera?  Pass
-``--decoder pyav`` (or ``--decoder gstreamer``) to ``uvc_capture_video.py``.
-When you explicitly request a backend the MJPEG payload is also routed through
-it, so the log shows the backend in use and you can validate the canvas without
-tracking down a frame-based device yet.  Leave the flag at ``auto`` (the
-default) to keep using the historic fast-path decoders.
+``--decoder pyav`` (ou ``--decoder gstreamer``) à ``uvc_capture_video.py``.
+Quand tu demandes explicitement un backend, le flux MJPEG y transitera aussi,
+le log affichera donc exactement quel décodeur tourne et tu peux valider la
+chaîne sans devoir trouver une caméra H.264/H.265.  Le backend GStreamer sait
+d’ores et déjà décoder MJPEG, H.264 et H.265 (via ``avdec_*``) – PyAV couvre
+MJPEG et H.264/HEVC également.  Laisse l’option sur ``auto`` (valeur par
+défaut) pour continuer à utiliser les décodages historiques super rapides.
 
 For a scripted example that also toggles the LED after a delay, see `examples/uvc_led_preview.py`.
 

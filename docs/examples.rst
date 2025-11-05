@@ -14,8 +14,10 @@ options:
 * ``--width`` / ``--height`` — target frame size.
 * ``--fps`` — desired frame rate; combine with ``--strict-fps`` to enforce exact matches.
 * ``--codec`` — choose ``auto``, ``mjpeg``, or ``yuyv``.
-* ``--decoder`` — force the experimental decoder backend (``auto``, ``none``, ``pyav``, ``gstreamer``).  Explicit
-  choices also route MJPEG payloads through the backend so you can validate the path on legacy cameras.
+* ``--decoder`` — force le backend de décodage (``auto``, ``none``, ``pyav``, ``gstreamer``).  Un choix explicite
+  enverra également le MJPEG dans ce backend : pratique pour valider PyAV ou
+  GStreamer sans matériel H.264.  Le pipeline GStreamer embarqué sait déjà
+  dépiler MJPEG, H.264 et H.265 via ``jpegdec``/``avdec_h26*``.
 * ``--duration`` — automatically stop after ``N`` seconds.
 
 ``uvc_capture_frame.py``

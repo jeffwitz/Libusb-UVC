@@ -8,6 +8,7 @@ from libusb_uvc import (
     VS_FORMAT_FRAME_BASED,
     VS_FORMAT_MJPEG,
 )
+from libusb_uvc.decoders import _select_gstreamer_pipeline
 
 
 class DummyCamera:
@@ -168,3 +169,17 @@ def test_frame_stream_installs_requested_decoder(monkeypatch):
     assert captured["description"] == "H.264"
     assert stream._decoder is not None
     assert stream._decoder_backend_name == "pyav"
+
+
+def test_select_gstreamer_pipeline_configs():
+    pipeline, caps = _select_gstreamer_pipeline("mjpeg")
+    assert "jpegdec" in pipeline
+    assert caps == "image/jpeg"
+
+    pipeline, caps = _select_gstreamer_pipeline("h264")
+    assert "h264parse" in pipeline and "avdec_h264" in pipeline
+    assert "video/x-h264" in caps
+
+    pipeline, caps = _select_gstreamer_pipeline("hevc")
+    assert "h265parse" in pipeline and "avdec_h265" in pipeline
+    assert "video/x-h265" in caps

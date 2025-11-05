@@ -9,7 +9,7 @@ extended in the future (e.g. Media Foundation, VideoToolbox).
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Iterable, List, Optional
+from typing import Iterable, List, Optional, Tuple
 
 import logging
 import threading
@@ -46,8 +46,46 @@ class DecoderBackend(ABC):
         return []
 
 
+def _select_gstreamer_pipeline(codec: str) -> Tuple[str, Optional[str]]:
+    """Return (pipeline_description, caps) for the requested codec."""
+
+    codec = codec.lower()
+    if codec in {"mjpeg", "jpeg", "jpg"}:
+        pipeline = (
+            "appsrc name=src is-live=true format=time do-timestamp=true "
+            "! jpegdec ! videoconvert ! video/x-raw,format=RGB "
+            "! appsink name=sink sync=false drop=true max-buffers=1"
+        )
+        caps = "image/jpeg"
+        return pipeline, caps
+
+    if codec == "h264":
+        pipeline = (
+            "appsrc name=src is-live=true format=time do-timestamp=true "
+            "! h264parse config-interval=-1 "
+            "! avdec_h264 "
+            "! videoconvert ! video/x-raw,format=RGB "
+            "! appsink name=sink sync=false drop=true max-buffers=1"
+        )
+        caps = "video/x-h264,stream-format=byte-stream,alignment=au"
+        return pipeline, caps
+
+    if codec in {"h265", "hevc"}:
+        pipeline = (
+            "appsrc name=src is-live=true format=time do-timestamp=true "
+            "! h265parse config-interval=-1 "
+            "! avdec_h265 "
+            "! videoconvert ! video/x-raw,format=RGB "
+            "! appsink name=sink sync=false drop=true max-buffers=1"
+        )
+        caps = "video/x-h265,stream-format=byte-stream,alignment=au"
+        return pipeline, caps
+
+    raise DecoderUnavailable(f"GStreamer backend does not recognise codec '{codec}'")
+
+
 class _GStreamerDecoder(DecoderBackend):
-    """GStreamer-based backend for MJPEG and, in the future, other codecs."""
+    """GStreamer-based backend for MJPEG and frame-based codecs."""
 
     def __init__(self, format_name: str) -> None:  # pragma: no cover - optional dependency
         super().__init__(format_name)
@@ -66,12 +104,11 @@ class _GStreamerDecoder(DecoderBackend):
         self._GLib = GLib
         Gst.init(None)
 
+        codec_name = _normalise_codec_name(format_name)
+        pipeline_desc, caps_string = _select_gstreamer_pipeline(codec_name)
+
         try:
-            self._pipeline = Gst.parse_launch(
-                "appsrc name=src is-live=true format=time do-timestamp=true "
-                "! jpegdec ! videoconvert ! video/x-raw,format=RGB "
-                "! appsink name=sink sync=false drop=true max-buffers=1"
-            )
+            self._pipeline = Gst.parse_launch(pipeline_desc)
         except GLib.Error as exc:
             raise DecoderUnavailable(f"Failed to create GStreamer pipeline: {exc}") from exc
 
@@ -82,8 +119,9 @@ class _GStreamerDecoder(DecoderBackend):
 
         self._appsink.set_property("emit-signals", False)
 
-        caps = Gst.Caps.from_string("image/jpeg")
-        self._appsrc.set_property("caps", caps)
+        if caps_string:
+            caps = Gst.Caps.from_string(caps_string)
+            self._appsrc.set_property("caps", caps)
 
         self._lock = threading.Lock()
         self._timestamp = 0
