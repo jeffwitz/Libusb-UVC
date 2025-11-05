@@ -1,0 +1,138 @@
+{
+  "device": {
+    "vendor_id": 4660,
+    "product_id": 22136,
+    "manufacturer": "PyUVC",
+    "product": "PyUVC Virtual Camera",
+    "serial_number": "UVCEMU001"
+  },
+  "video_control": {
+    "interface_number": 0,
+    "units": [
+      {
+        "type": "processing",
+        "unit_id": 2,
+        "controls": [
+          {
+            "name": "Brightness",
+            "selector": 1,
+            "length": 2,
+            "min": 0,
+            "max": 255,
+            "step": 1,
+            "default": 128
+          },
+          {
+            "name": "Contrast",
+            "selector": 2,
+            "length": 2,
+            "min": 0,
+            "max": 255,
+            "step": 1,
+            "default": 64
+          }
+        ]
+      }
+    ]
+  },
+  "video_streaming": {
+    "interface_number": 1,
+    "formats": [
+      {
+        "format_index": 1,
+        "subtype": "mjpeg",
+        "default_interval": 333333,
+        "frames": [
+          {
+            "frame_index": 1,
+            "width": 640,
+            "height": 480,
+            "intervals": [
+              333333,
+              666666
+            ]
+          },
+          {
+            "frame_index": 2,
+            "width": 320,
+            "height": 240,
+            "intervals": [
+              333333
+            ]
+          }
+        ],
+        "still_frames": [
+          {
+            "frame_index": 1,
+            "width": 640,
+            "height": 480,
+            "compressions": [
+              1,
+              5,
+              10,
+              20
+            ]
+          }
+        ]
+      },
+      {
+        "format_index": 2,
+        "subtype": "yuyv",
+        "default_interval": 333333,
+        "frames": [
+          {
+            "frame_index": 1,
+            "width": 640,
+            "height": 480,
+            "intervals": [
+              333333
+            ]
+          }
+        ],
+        "still_frames": [
+          {
+            "frame_index": 1,
+            "width": 640,
+            "height": 480,
+            "compressions": [
+              1
+            ]
+          }
+        ]
+      },
+      {
+        "format_index": 3,
+        "subtype": "h264",
+        "default_interval": 333333,
+        "frames": [
+          {
+            "frame_index": 1,
+            "width": 640,
+            "height": 360,
+            "intervals": [
+              333333
+            ]
+          }
+        ],
+        "still_frames": [
+          {
+            "frame_index": 1,
+            "width": 640,
+            "height": 360,
+            "compressions": [
+              1
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "streaming_defaults": {
+    "max_payload_transfer_size": 2048,
+    "max_video_frame_size": 614400
+  },
+  "functionfs": {
+    "descriptors": "uvc_descriptors.bin",
+    "strings": "uvc_strings.bin"
+  }
+}
