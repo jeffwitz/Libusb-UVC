@@ -114,7 +114,7 @@ decoder preference explicitly::
 
 If you pick a specific backend, MJPEG payloads are routed through it as well so
 you can validate the plumbing on legacy cameras.  The embedded GStreamer
-pipeline already covers MJPEG, H.264, and H.265 (via ``jpegdec``/``avdec_h26*``),
+pipeline already covers MJPEG, H.264, and H.265 (``jpegdec``/``avdec_h26*``),
 while PyAV provides software MJPEG + H.264/HEVC decoding.  Leave the preference
 at ``auto`` to keep the historical MJPEG/uncompressed fast paths.
 
