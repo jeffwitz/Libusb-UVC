@@ -165,6 +165,48 @@ class CodecPreference(str):
     YUYV = "yuyv"
     MJPEG = "mjpeg"
 
+
+class DecoderPreference(str):
+    """Optional decoder selection for compressed payloads."""
+
+    AUTO = "auto"
+    NONE = "none"
+    PYAV = "pyav"
+    GSTREAMER = "gstreamer"
+
+
+def _normalise_decoder_preference(
+    preference: Optional[Union[str, DecoderPreference, Iterable[str]]]
+) -> Optional[List[str]]:
+    if preference is None:
+        return []
+
+    if isinstance(preference, DecoderPreference):
+        tokens = [preference.value]
+    elif isinstance(preference, str):
+        tokens = [token.strip().lower() for token in preference.split(",") if token.strip()]
+    elif isinstance(preference, Iterable):
+        tokens = [str(token).strip().lower() for token in preference if str(token).strip()]
+    else:
+        tokens = [str(preference).strip().lower()]
+
+    if not tokens:
+        return []
+
+    tokens = [token for token in tokens if token]
+
+    if any(token == DecoderPreference.NONE for token in tokens):
+        return None
+
+    tokens = [token for token in tokens if token != DecoderPreference.AUTO]
+
+    deduped: List[str] = []
+    for token in tokens:
+        if token and token not in deduped:
+            deduped.append(token)
+
+    return deduped
+
 # --- UVC Constants ---
 UVC_CLASS = 0x0E
 VC_SUBCLASS = 0x01
@@ -1437,7 +1479,7 @@ def perform_still_probe_commit(
 
 
 
-from .decoders import create_decoder_backend, DecoderUnavailable
+from .decoders import DEFAULT_BACKEND_ORDER, create_decoder_backend, DecoderUnavailable
 from .uvc_async import IsoConfig, UVCPacketStream, InterruptConfig, InterruptListener
 class UVCCamera:
     """Minimal helper to configure a streaming interface and fetch frames."""
@@ -2171,6 +2213,7 @@ class UVCCamera:
         width: Optional[int] = None,
         height: Optional[int] = None,
         codec: CodecPreference = CodecPreference.AUTO,
+        decoder: Optional[Union[str, DecoderPreference, Iterable[str]]] = DecoderPreference.AUTO,
         format_index: Optional[int] = None,
         frame_index: Optional[int] = None,
         frame_rate: Optional[float] = None,
@@ -2182,7 +2225,15 @@ class UVCCamera:
         timeout_ms: int = 2000,
         duration: Optional[float] = None,
     ) -> "FrameStream":
-        """Return a managed frame iterator for continuous streaming."""
+        """Return a managed frame iterator for continuous streaming.
+
+        Parameters
+        ----------
+        decoder:
+            Optional decoder backend preference for frame-based codecs (for example
+            H.264/H.265).  Use :data:`DecoderPreference.NONE` to keep raw payloads
+            and defer decoding.  MJPEG and uncompressed formats ignore this setting.
+        """
 
         stream_format, frame = self.select_stream(
             width=width,
@@ -2204,6 +2255,7 @@ class UVCCamera:
             packets_per_transfer=packets_per_transfer,
             timeout_ms=timeout_ms,
             duration=duration,
+            decoder_preference=decoder,
         )
 
     def configure_stream(
@@ -2939,7 +2991,7 @@ class UVCCamera:
                     and (expected_size is None or len(frame_bytes) == expected_size)
                 ):
                     payload_bytes = bytes(frame_bytes)
-                    decoded = self._decode_payload_once(payload_bytes)
+                    decoded = _decode_payload_once(self._format, payload_bytes)
                     return CapturedFrame(
                         payload=payload_bytes,
                         format=self._format,
@@ -2991,7 +3043,7 @@ class UVCCamera:
                 pts = int.from_bytes(packet[2:6], "little")
 
             payload_bytes = bytes(frame_bytes)
-            decoded = self._decode_payload_once(payload_bytes)
+            decoded = _decode_payload_once(self._format, payload_bytes)
             result = CapturedFrame(
                 payload=payload_bytes,
                 format=self._format,
@@ -3105,26 +3157,33 @@ def _parse_probe_payload(payload: bytes) -> dict:
     interval = result.get("dwFrameInterval")
     if interval:
         result["frame_rate_hz"] = _interval_to_hz(interval)
-        return result
+    return result
 
-    def _decode_payload_once(self, payload: bytes) -> Optional[object]:
-        if self._format is None or self._format.subtype != VS_FORMAT_FRAME_BASED:
-            return None
-        try:
-            decoder = create_decoder_backend(self._format.description)
-        except DecoderUnavailable:
-            return None
-        try:
-            frames = decoder.decode_packet(payload)
-            frames.extend(decoder.flush())
-        except Exception as exc:  # pragma: no cover - backend dependent
-            LOG.warning("On-demand decoder failed: %s", exc)
-            return None
-        if not frames:
-            return None
-        if len(frames) > 1:
-            LOG.debug("One-shot decoder produced %s frames; returning the first one", len(frames))
-        return frames[0]
+def _decode_payload_once(
+    format_descriptor: Optional[StreamFormat],
+    payload: bytes,
+    decoder_order: Optional[List[str]] = None,
+) -> Optional[object]:
+    if format_descriptor is None or format_descriptor.subtype != VS_FORMAT_FRAME_BASED:
+        return None
+    try:
+        decoder = create_decoder_backend(
+            format_descriptor.description,
+            preference=decoder_order,
+        )
+    except DecoderUnavailable:
+        return None
+    try:
+        frames = decoder.decode_packet(payload)
+        frames.extend(decoder.flush())
+    except Exception as exc:  # pragma: no cover - backend dependent
+        LOG.warning("On-demand decoder failed: %s", exc)
+        return None
+    if not frames:
+        return None
+    if len(frames) > 1:
+        LOG.debug("One-shot decoder produced %s frames; returning the first one", len(frames))
+    return frames[0]
 
 
 class FrameStream:
@@ -3144,6 +3203,7 @@ class FrameStream:
         packets_per_transfer: int,
         timeout_ms: int,
         duration: Optional[float],
+        decoder_preference: Optional[Union[str, DecoderPreference, Iterable[str]]] = None,
     ) -> None:
         self._camera = camera
         self._format = stream_format
@@ -3156,6 +3216,18 @@ class FrameStream:
         self._packets_per_transfer = packets_per_transfer
         self._timeout_ms = timeout_ms
         self._duration = duration
+        self._decoder_preference = decoder_preference
+        self._decoder_order = _normalise_decoder_preference(decoder_preference)
+        self._decoder_failures: Set[str] = set()
+        self._decoder_backend_name: Optional[str] = None
+        self._decoder_backend_key: Optional[str] = None
+        self._decoder_exhausted = False
+        if self._decoder_order is None:
+            self._decoder_preference_label = DecoderPreference.NONE
+        elif not self._decoder_order:
+            self._decoder_preference_label = DecoderPreference.AUTO
+        else:
+            self._decoder_preference_label = ", ".join(self._decoder_order)
 
         self._stop_event = threading.Event()
         self._poll_thread: Optional[threading.Thread] = None
@@ -3170,6 +3242,8 @@ class FrameStream:
 
         is_mjpeg = stream_format.subtype == VS_FORMAT_MJPEG or "MJPG" in stream_format.description.upper()
         is_frame_based = stream_format.subtype == VS_FORMAT_FRAME_BASED
+        decoder_requested = bool(self._decoder_order)
+        self._decoder_applicable = is_frame_based or (is_mjpeg and decoder_requested)
         self._expected_size = (
             None
             if is_mjpeg or is_frame_based
@@ -3178,12 +3252,25 @@ class FrameStream:
 
         self._decoder = None
         self._decoder_failed = False
-        if is_frame_based:
-            try:
-                self._decoder = create_decoder_backend(stream_format.description)
-                LOG.debug("Using decoder backend %s for %s", type(self._decoder).__name__, stream_format.description)
-            except DecoderUnavailable as exc:
-                LOG.warning("No decoder backend available for %s: %s", stream_format.description, exc)
+        if self._decoder_order is None:
+            if self._decoder_applicable:
+                LOG.info(
+                    "Decoder preference 'none' disables decoding for %s",
+                    stream_format.description,
+                )
+        elif self._decoder_applicable:
+            self._install_decoder(initial=True)
+        elif decoder_preference not in (None, DecoderPreference.AUTO):
+            LOG.info(
+                "Decoder preference %s ignored for non-decodable format %s",
+                self._decoder_preference_label,
+                stream_format.description,
+            )
+        elif is_mjpeg:
+            LOG.info(
+                "Decoder preference auto keeps legacy pipeline for %s",
+                stream_format.description,
+            )
 
     def __enter__(self) -> "FrameStream":
         negotiation = self._camera.configure_stream(
@@ -3267,14 +3354,85 @@ class FrameStream:
             except queue.Full:
                 LOG.debug("FrameStream queue full; dropping frame %s", frame.sequence)
 
+    def _install_decoder(self, *, initial: bool = False) -> None:
+        if not self._decoder_applicable or self._decoder_order is None:
+            return
+
+        if self._decoder_order:
+            candidates = [name for name in self._decoder_order if name not in self._decoder_failures]
+            if not candidates:
+                LOG.debug("All requested decoder backends exhausted for %s", self._format.description)
+                self._decoder = None
+                self._decoder_backend_name = None
+                self._decoder_backend_key = None
+                self._decoder_failed = True
+                self._decoder_exhausted = True
+                return
+            preference: Optional[List[str]] = candidates
+        else:
+            if not self._decoder_failures:
+                preference = None
+            else:
+                remaining = [name for name in DEFAULT_BACKEND_ORDER if name not in self._decoder_failures]
+                if not remaining:
+                    LOG.debug("All decoder backends exhausted for %s", self._format.description)
+                    self._decoder = None
+                    self._decoder_backend_name = None
+                    self._decoder_backend_key = None
+                    self._decoder_failed = True
+                    self._decoder_exhausted = True
+                    return
+                preference = remaining
+
+        try:
+            backend = create_decoder_backend(
+                self._format.description,
+                preference=preference,
+            )
+        except DecoderUnavailable as exc:
+            if initial:
+                LOG.warning("No decoder backend available for %s: %s", self._format.description, exc)
+            else:
+                LOG.debug("Decoder backend unavailable for %s: %s", self._format.description, exc)
+            self._decoder = None
+            self._decoder_backend_name = None
+            self._decoder_backend_key = None
+            self._decoder_failed = True
+            self._decoder_exhausted = True
+            return
+
+        self._decoder = backend
+        self._decoder_failed = False
+        self._decoder_exhausted = False
+        backend_name = getattr(backend, "backend_name", None)
+        label = backend_name or type(backend).__name__
+        self._decoder_backend_name = str(label)
+        self._decoder_backend_key = str(label).lower()
+        if initial:
+            LOG.info("Decoder backend %s active for %s", label, self._format.description)
+        else:
+            LOG.info("Decoder backend switched to %s for %s", label, self._format.description)
+
     def _decode_payload(self, payload: bytes) -> Optional[object]:
-        if not self._decoder or self._decoder_failed:
+        if not self._decoder_applicable or self._decoder_order is None:
+            return None
+        if self._decoder is None and not self._decoder_exhausted:
+            self._install_decoder()
+        if not self._decoder or self._decoder_failed or self._decoder_exhausted:
             return None
         try:
             frames = self._decoder.decode_packet(payload)
         except Exception as exc:  # pragma: no cover - backend dependent
-            LOG.warning("Decoder backend %s failed: %s", type(self._decoder).__name__, exc)
+            backend_label = self._decoder_backend_name or type(self._decoder).__name__
+            LOG.warning("Decoder backend %s failed: %s", backend_label, exc)
+            if self._decoder_backend_key:
+                self._decoder_failures.add(self._decoder_backend_key)
             self._decoder_failed = True
+            self._decoder = None
+            self._decoder_backend_name = None
+            self._decoder_backend_key = None
+            if not self._decoder_exhausted:
+                self._install_decoder()
             return None
         if not frames:
             return None
@@ -3982,6 +4140,7 @@ __all__ = [
     "FrameStream",
     "UVCError",
     "CodecPreference",
+    "DecoderPreference",
     "describe_device",
     "find_uvc_devices",
     "iter_video_streaming_interfaces",

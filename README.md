@@ -144,6 +144,13 @@ python3 examples/uvc_capture_video.py \
 
 `UVCCamera.stream()` feeds a frame iterator; pressing `q`/`ESC` still stops the preview. The device is reset on exit, so a subsequent `mplayer tv:// -tv driver=v4l2:device=/dev/video0` continues to work without unplugging the camera.
 
+Need to exercise the new decoder plumbing even on a MJPEG-only camera?  Pass
+``--decoder pyav`` (or ``--decoder gstreamer``) to ``uvc_capture_video.py``.
+When you explicitly request a backend the MJPEG payload is also routed through
+it, so the log shows the backend in use and you can validate the canvas without
+tracking down a frame-based device yet.  Leave the flag at ``auto`` (the
+default) to keep using the historic fast-path decoders.
+
 For a scripted example that also toggles the LED after a delay, see `examples/uvc_led_preview.py`.
 
 To play with manual exposure, try `examples/exposure_sweep.py`, which disables auto exposure and sweeps `Exposure Time, Absolute` from its minimum to maximum over 300 frames while overlaying the current value on the preview window.

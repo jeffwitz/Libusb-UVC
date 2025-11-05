@@ -104,6 +104,18 @@ claiming and streaming::
        if original_exposure is not None:
            cam.set_control("Exposure Time, Absolute", original_exposure)
 
+When experimenting with compressed codecs (H.264/H.265) you can supply a
+decoder preference explicitly::
+
+   from libusb_uvc import DecoderPreference
+
+   with cam.stream(decoder=DecoderPreference.PYAV, duration=5) as frames:
+       ...
+
+If you pick a specific backend, MJPEG payloads are routed through it as well so
+you can validate the plumbing on legacy cameras.  Leave the preference at
+``auto`` to keep the historical MJPEG/uncompressed fast paths.
+
 Next Steps
 ----------
 

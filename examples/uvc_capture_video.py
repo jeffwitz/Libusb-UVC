@@ -13,10 +13,24 @@ import cv2
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 try:
-    from libusb_uvc import CodecPreference, StreamingInterface, UVCCamera, UVCError, describe_device
+    from libusb_uvc import (
+        CodecPreference,
+        DecoderPreference,
+        StreamingInterface,
+        UVCCamera,
+        UVCError,
+        describe_device,
+    )
 except ImportError:  # pragma: no cover - editable install fallback
     sys.path.insert(0, str(ROOT / "src"))
-    from libusb_uvc import CodecPreference, StreamingInterface, UVCCamera, UVCError, describe_device
+    from libusb_uvc import (
+        CodecPreference,
+        DecoderPreference,
+        StreamingInterface,
+        UVCCamera,
+        UVCError,
+        describe_device,
+    )
 
 LOG = logging.getLogger("capture_video")
 
@@ -71,6 +85,17 @@ def main() -> int:
         default=CodecPreference.AUTO,
         help="Force a specific codec when multiple are available",
     )
+    parser.add_argument(
+        "--decoder",
+        choices=[
+            DecoderPreference.AUTO,
+            DecoderPreference.NONE,
+            DecoderPreference.PYAV,
+            DecoderPreference.GSTREAMER,
+        ],
+        default=DecoderPreference.AUTO,
+        help="Select a decoder backend for frame-based formats (experimental)",
+    )
     parser.add_argument("--strict-fps", action="store_true", help="Require exact FPS match during PROBE")
     parser.add_argument("--duration", type=float, help="Automatically stop preview after the given seconds")
     parser.add_argument("--list", action="store_true", help="List formats for the interface and exit")
@@ -98,6 +123,7 @@ def main() -> int:
                 width=args.width,
                 height=args.height,
                 codec=args.codec,
+                decoder=args.decoder,
                 frame_rate=frame_rate,
                 strict_fps=args.strict_fps,
                 queue_size=6,

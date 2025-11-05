@@ -111,26 +111,54 @@ def _normalise_codec_name(format_name: str) -> str:
     return lowered
 
 
-_BACKENDS = [_GStreamerDecoder, _PyAVDecoder]
+_BACKEND_REGISTRY = {
+    "gstreamer": _GStreamerDecoder,
+    "pyav": _PyAVDecoder,
+}
+_DEFAULT_ORDER = ["gstreamer", "pyav"]
+DEFAULT_BACKEND_ORDER = tuple(_DEFAULT_ORDER)
 
 
-def create_decoder_backend(format_name: str) -> DecoderBackend:
-    """Return the first available backend for *format_name*."""
+def create_decoder_backend(format_name: str, preference: Optional[Iterable[str]] = None) -> DecoderBackend:
+    """Return the first available backend for *format_name*.
+
+    *preference* can be an iterable of backend names (``"pyav"``, ``"gstreamer"``).
+    When omitted, the default discovery order is used.
+    """
+
+    names: List[str] = []
+    if preference:
+        for name in preference:
+            if name == "auto":
+                continue
+            if name in _BACKEND_REGISTRY and name not in names:
+                names.append(name)
+            else:
+                LOG.debug("Unknown decoder backend '%s' ignored", name)
+    if not names:
+        names = list(_DEFAULT_ORDER)
 
     errors: List[str] = []
-    for backend_cls in _BACKENDS:
+    for name in names:
+        backend_cls = _BACKEND_REGISTRY.get(name)
+        if backend_cls is None:
+            continue
         try:
-            return backend_cls(format_name)
+            backend = backend_cls(format_name)
+            try:
+                setattr(backend, "backend_name", name)
+            except Exception:  # pragma: no cover - defensive
+                pass
+            return backend
         except DecoderUnavailable as exc:
-            errors.append(str(exc))
-            LOG.debug("Decoder backend %s unavailable: %s", backend_cls.__name__, exc)
-    raise DecoderUnavailable(
-        "; ".join(errors) if errors else "No decoder backend available"
-    )
+            errors.append(f"{name}: {exc}")
+            LOG.debug("Decoder backend %s unavailable: %s", name, exc)
+    raise DecoderUnavailable("; ".join(errors) if errors else "No decoder backend available")
 
 
 __all__ = [
     "DecoderBackend",
     "DecoderUnavailable",
     "create_decoder_backend",
+    "DEFAULT_BACKEND_ORDER",
 ]
