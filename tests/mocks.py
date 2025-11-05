@@ -32,6 +32,7 @@ class _MockInterface:
         self.bNumEndpoints = len(endpoints)
         self._endpoints = endpoints
         self.extra_descriptors = extra_descriptors
+        self.interface_number = interface_number
 
     def __iter__(self):
         return iter(self._endpoints)
@@ -43,9 +44,41 @@ class _MockInterface:
 class _MockConfiguration:
     def __init__(self, interfaces: List[_MockInterface]):
         self._interfaces = interfaces
+        self.bConfigurationValue = 1
 
     def __iter__(self):
         return iter(self._interfaces)
+
+
+class _AltSetting:
+    def __init__(self, alternate_setting: int, endpoint) -> None:
+        self.alternate_setting = alternate_setting
+        self.endpoint_address = endpoint.bEndpointAddress if endpoint else None
+        self.endpoint_attributes = endpoint.bmAttributes if endpoint else None
+        self.max_packet_size = endpoint.wMaxPacketSize if endpoint else 0
+
+    def is_isochronous(self) -> bool:
+        return True
+
+
+class StreamingInterfaceAdapter:
+    """Adapter exposing the attributes expected by :class:`UVCCamera`."""
+
+    def __init__(self, interface: _MockInterface, extra_formats):
+        self._interface = interface
+        self.interface_number = interface.interface_number
+        self.formats = list(extra_formats)
+        endpoint = interface._endpoints[0] if interface._endpoints else None
+        self.alt_settings = [_AltSetting(interface.bAlternateSetting, endpoint)]
+
+    def get_alt(self, alternate_setting: int):
+        for alt in self.alt_settings:
+            if alt.alternate_setting == alternate_setting:
+                return alt
+        return None
+
+    def select_alt_for_payload(self, required_payload: int):
+        return self.alt_settings[0]
 
 
 class MockUsbDevice:
@@ -78,9 +111,25 @@ class MockUsbDevice:
                 ]
             )
         ]
+        self._claimed_interfaces = set()
+
+        class _DummyContext:
+            def __init__(self, owner) -> None:
+                self._owner = owner
+
+            def managed_claim_interface(self, device, interface):
+                self._owner._claimed_interfaces.add(interface)
+
+            def managed_release_interface(self, device, interface):
+                self._owner._claimed_interfaces.discard(interface)
+
+        self._ctx = _DummyContext(self)
 
     def __iter__(self):
         return iter(self._configurations)
+
+    def set_configuration(self, *args, **kwargs):  # pragma: no cover - trivial
+        return None
 
     # ------------------------------------------------------------------
     # PyUSB facade
@@ -128,6 +177,19 @@ class MockUsbDevice:
 
     def attach_kernel_driver(self, interface: int) -> None:
         return None
+
+    def release_interface(self, interface: int) -> None:
+        self._ctx.managed_release_interface(self, interface)
+
+    def set_interface_altsetting(self, interface: int, alternate_setting: int) -> None:
+        return None
+
+    def clear_halt(self, endpoint: int) -> None:
+        return None
+
+    def read(self, endpoint: int, size: int, timeout: Optional[int] = None):
+        packet = self._emulator.get_next_video_packet()
+        return packet[:size]
 
     @property
     def log(self) -> List[dict]:

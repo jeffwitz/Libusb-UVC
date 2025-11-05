@@ -280,9 +280,14 @@ mocks and runs quickly on any machine:
 * verifies that enumerated controls match the profile and that synthetic values
   round-trip through :func:`libusb_uvc.vc_ctrl_get` / :func:`libusb_uvc.vc_ctrl_set`
 
-Run it with::
+``tests/test_streaming.py`` complements this by configuring the streaming path
+and reading MJPEG frames produced by the emulator.  It checks that the
+negotiated endpoint metadata matches expectations and that the payload is
+identical to the fixture in ``tests/data/test_video.mjpeg``.
 
-   python -m pytest tests/test_controls.py
+Run the unit suite with::
+
+   python -m pytest tests/test_controls.py tests/test_streaming.py
 
 ### Integration tests (USB gadget)
 

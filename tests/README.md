@@ -18,14 +18,20 @@ The unit tests do not need any special privileges.  Install the project in
 editable mode with the testing extras (or ensure `pytest` is available) and run:
 
 ```bash
-python -m pytest tests/test_controls.py
+python -m pytest tests/test_controls.py tests/test_streaming.py
 ```
 
-The tests load the sample profile located in `tests/data/` and ensure that the
-control manager interacts with the emulator exclusively through mock PyUSB
-objects.  Assertions cover both the high-level enumeration and the raw
+The control tests load the sample profile located in `tests/data/` and ensure
+that the control manager interacts with the emulator exclusively through mock
+PyUSB objects.  Assertions cover both the high-level enumeration and the raw
 ``vc_ctrl_get`` / ``vc_ctrl_set`` helpers so that round-trips are validated at
 every layer.
+
+The streaming tests exercise :class:`libusb_uvc.UVCCamera.configure_stream`
+and :meth:`libusb_uvc.UVCCamera.read_frame` against the emulator.  They verify
+that the negotiated endpoint/payload metadata matches expectations and that the
+captured MJPEG payload is byte-for-byte identical to the fixture stored in
+``tests/data/test_video.mjpeg``.
 
 ## Running the integration tests
 
