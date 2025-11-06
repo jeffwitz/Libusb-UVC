@@ -21,6 +21,8 @@ except Exception:  # pragma: no cover - optional dependency
 
 LOG = logging.getLogger(__name__)
 
+_H264_START_CODE = b"\x00\x00\x00\x01"
+
 
 class DecoderError(RuntimeError):
     """Base class for decoder-related exceptions."""
@@ -84,6 +86,109 @@ def _select_gstreamer_pipeline(codec: str) -> Tuple[str, Optional[str]]:
     raise DecoderUnavailable(f"GStreamer backend does not recognise codec '{codec}'")
 
 
+def _extract_h264_nalus(data: bytes, *, avc_length_size: int = 0) -> Iterable[bytes]:
+    """Yield raw H.264 NAL units from *data*.
+
+    When *avc_length_size* is non-zero the payload is interpreted as AVC format
+    (length-prefixed). Otherwise Annex B start codes are used.
+    """
+
+    if avc_length_size:
+        total = len(data)
+        offset = 0
+        while offset + avc_length_size <= total:
+            nal_size = int.from_bytes(data[offset : offset + avc_length_size], "big", signed=False)
+            offset += avc_length_size
+            if nal_size <= 0 or offset + nal_size > total:
+                break
+            yield data[offset : offset + nal_size]
+            offset += nal_size
+        return
+
+    # Annex B parsing
+    total = len(data)
+    offset = 0
+    while offset < total:
+        next_start = data.find(_H264_START_CODE, offset)
+        if next_start == -1:
+            if offset == 0:
+                return
+            yield data[offset:total]
+            break
+        if next_start == offset:
+            offset += len(_H264_START_CODE)
+            continue
+        yield data[offset:next_start]
+        offset = next_start + len(_H264_START_CODE)
+    else:
+        if offset < total:
+            yield data[offset:total]
+
+
+class _H264Normalizer:
+    """Normalise H.264 payloads to Annex B and reuse cached SPS/PPS."""
+
+    def __init__(self) -> None:
+        self._sps: List[bytes] = []
+        self._pps: List[bytes] = []
+        self._have_idr = False
+        self._avc_length_size: Optional[int] = None
+
+    def _detect_layout(self, payload: bytes) -> int:
+        if payload.startswith(_H264_START_CODE) or payload.find(_H264_START_CODE, 1) != -1:
+            return 0
+        for length_size in (4, 3, 2, 1):
+            if len(payload) <= length_size:
+                continue
+            nal_size = int.from_bytes(payload[:length_size], "big", signed=False)
+            if 0 < nal_size <= len(payload) - length_size:
+                return length_size
+        return 0
+
+    def feed(self, payload: bytes) -> Optional[bytes]:
+        if not payload:
+            return None
+
+        if self._avc_length_size is None:
+            self._avc_length_size = self._detect_layout(payload)
+
+        nalus = list(_extract_h264_nalus(payload, avc_length_size=self._avc_length_size))
+        if not nalus:
+            return None
+
+        out: List[bytes] = []
+        produced = False
+
+        for nal in nalus:
+            if not nal:
+                continue
+            nal_type = nal[0] & 0x1F
+            if nal_type == 7:  # SPS
+                self._sps = [nal]
+                continue
+            if nal_type == 8:  # PPS
+                self._pps = [nal]
+                continue
+            if nal_type == 5:  # IDR
+                if not self._sps or not self._pps:
+                    return None
+                out.extend(self._sps)
+                out.extend(self._pps)
+                out.append(nal)
+                self._have_idr = True
+                produced = True
+            else:
+                if not self._have_idr:
+                    continue
+                out.append(nal)
+                produced = True
+
+        if not produced:
+            return None
+
+        return b"".join(_H264_START_CODE + nal for nal in out)
+
+
 class _GStreamerDecoder(DecoderBackend):
     """GStreamer-based backend for MJPEG and frame-based codecs."""
 
@@ -127,6 +232,7 @@ class _GStreamerDecoder(DecoderBackend):
         self._timestamp = 0
         self._frame_duration = Gst.SECOND // 30  # default, adjusted dynamically when available
         self._timeout_ns = int(0.5 * Gst.SECOND)
+        self._normalizer = _H264Normalizer() if codec_name == "h264" else None
 
         state_change = self._pipeline.set_state(Gst.State.PLAYING)
         if state_change == Gst.StateChangeReturn.FAILURE:
@@ -159,6 +265,11 @@ class _GStreamerDecoder(DecoderBackend):
         with self._lock:
             if self._pipeline is None:
                 return []
+
+            if self._normalizer is not None:
+                packet = self._normalizer.feed(packet)
+                if packet is None:
+                    return []
 
             buf = self._build_buffer(packet)
             flow_ret = self._appsrc.emit("push-buffer", buf)
@@ -259,8 +370,13 @@ class _PyAVDecoder(DecoderBackend):
             self._codec = av.CodecContext.create(codec_name, "r")
         except av.AVError as exc:  # pragma: no cover - depends on installation
             raise DecoderUnavailable(f"PyAV cannot create codec '{codec_name}'") from exc
+        self._normalizer = _H264Normalizer() if codec_name == "h264" else None
 
     def decode_packet(self, packet: bytes) -> List[object]:  # pragma: no cover - backend optional
+        if self._normalizer is not None:
+            packet = self._normalizer.feed(packet)
+            if packet is None:
+                return []
         av_packet = self._av.packet.Packet(packet)
         frames: List[object] = []
         for frame in self._codec.decode(av_packet):
