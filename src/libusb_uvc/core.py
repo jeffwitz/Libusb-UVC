@@ -521,7 +521,9 @@ class CapturedFrame:
     def to_rgb(self):
         if self._rgb_cache is None:
             if self.decoded is not None:
-                self._rgb_cache = self.decoded
+                import numpy as _np
+
+                self._rgb_cache = _np.array(self.decoded, copy=True)
             else:
                 self._rgb_cache = decode_to_rgb(self.payload, self.format, self.frame)
         return self._rgb_cache
@@ -2983,7 +2985,7 @@ class UVCCamera:
                 time.sleep(0.1)
             with contextlib.suppress(usb1.USBError):
                 self._async_handle.releaseInterface(self.interface_number)
-            with contextlib.suppress(usb1.USBError):
+            with contextlib.suppress(usb1.USBError, AssertionError):
                 self._async_handle.close()
 
         if self._async_ctx is not None:
