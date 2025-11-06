@@ -158,6 +158,14 @@ already handles MJPEG, H.264, and H.265 (``jpegdec``/``avdec_h26*``) while
 PyAV provides software MJPEG + H.264/HEVC decoding.  Leave the option at
 ``auto`` (the default) to keep the blazing-fast legacy paths.
 
+Frame-based codecs deserve a special mention: many UVC firmwares omit Sequence
+Parameter Sets (SPS) and Picture Parameter Sets (PPS) from the first payloads to
+save bandwidth.  Libusb-UVC now caches any SPS/PPS it encounters and replays
+them ahead of IDR frames, so PyAV and GStreamer can start decoding even when the
+camera only advertises a bare P-slice.  When a device never sends SPS/PPS the
+stream remains undecodable; in that case the examples log a warning so you know
+the issue lies with the firmware rather than the host.
+
 To request a specific stream codec, use ``--codec``.  Besides ``auto``, ``yuyv``
 and ``mjpeg``, the helpers now accept ``frame-based``, ``h264`` and ``h265`` to
 target UVC frame-based formats.

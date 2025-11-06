@@ -43,7 +43,36 @@ log output.
 
 **Resolution:** Isochronous transfers are constrained by USB bandwidth. Move
 the camera to a direct root-port, lower the frame size or frame rate, or adjust
-the ``queue_size`` passed to :meth:`libusb_uvc.UVCCamera.stream`.
+    the ``queue_size`` passed to :meth:`libusb_uvc.UVCCamera.stream`.
+
+Frame-based H.264/H.265 Quirks
+------------------------------
+
+**Symptom:** The device advertises a ``Frame-based`` format but decoders report
+``Invalid data found when processing input`` or ``Unsupported codec for conversion``.
+
+**Cause:** UVC 1.5 allows cameras to send H.264/H.265 payloads without
+repeating the Sequence Parameter Set (SPS) and Picture Parameter Set (PPS) in
+every frame.  Some implementations go further and start streaming P-slices
+before emitting any SPS/PPS/IDR trio, leaving host decoders without the context
+they need.
+
+**Libusb-UVC behaviour:** The library detects Annex B and AVC payload layouts,
+caches the latest SPS/PPS it receives, and injects them ahead of IDR frames so
+PyAV and GStreamer can initialise.  Frames delivered before the configuration
+arrives are dropped; as soon as SPS/PPS appear the cached copy is reused for the
+rest of the session.
+
+**Resolution:** If the firmware never supplies SPS/PPS (it happens on some
+cheaper hardware) the stream remains undecodable.  You can:
+
+* Capture a raw payload with ``uvc_capture_frame.py --codec h264 --output`` and
+  inspect it with ``hexdump``—look for ``00 00 00 01 67`` (SPS) or ``... 01 65``
+  (IDR).
+* Check whether the vendor provides a driver that exposes H.264 Extension Unit
+  controls containing SPS/PPS blobs.
+* File a bug with the camera vendor; the host cannot reconstruct missing SPS/PPS
+  without reverse-engineering the firmware.
 
 Controls Missing or Unnamed
 ---------------------------

@@ -25,7 +25,10 @@ recent refactor that moved the implementation out of `__init__.py`.
   Provides the optional decoding backends through a common interface:
   - discovery helpers (`create_decoder_backend`, `DEFAULT_BACKEND_ORDER`);
   - concrete implementations for PyAV and GStreamer (`_PyAVDecoder`,
-    `_GStreamerDecoder`).
+    `_GStreamerDecoder`).  A lightweight `_H264Normalizer` normalises frame-based
+  payloads to Annex B, caches SPS/PPS, and replays them ahead of IDR frames so
+  backends receive a complete bitstream even when the firmware omits the
+  configuration NAL units.
   The module is imported lazily by `core.py` so that the heavy dependencies
   (PyAV, PyGObject/GStreamer) remain optional.
 
@@ -54,4 +57,3 @@ recent refactor that moved the implementation out of `__init__.py`.
   `stream.py`, `still.py`) would simplify maintenance and reduce import time.
 - The quirk schema should be formalised (JSON Schema) and validated during
   packaging.
-
