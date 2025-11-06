@@ -67,7 +67,14 @@ def main() -> int:
     parser.add_argument("--duration", type=float, default=30.0, help="Preview duration (seconds)")
     parser.add_argument(
         "--codec",
-        choices=[CodecPreference.AUTO, CodecPreference.YUYV, CodecPreference.MJPEG],
+        choices=[
+            CodecPreference.AUTO,
+            CodecPreference.YUYV,
+            CodecPreference.MJPEG,
+            CodecPreference.FRAME_BASED,
+            CodecPreference.H264,
+            CodecPreference.H265,
+        ],
         default=CodecPreference.YUYV,
         help="Preferred codec for the IR stream",
     )

@@ -100,7 +100,18 @@ def main() -> int:
     parser.add_argument("--interface", type=int, default=1, help="Video streaming interface number")
     parser.add_argument("--width", type=int, help="Still image width (defaults to the highest advertised if omitted)")
     parser.add_argument("--height", type=int, help="Still image height")
-    parser.add_argument("--codec", choices=[CodecPreference.AUTO, CodecPreference.YUYV, CodecPreference.MJPEG], default=CodecPreference.AUTO)
+    parser.add_argument(
+        "--codec",
+        choices=[
+            CodecPreference.AUTO,
+            CodecPreference.YUYV,
+            CodecPreference.MJPEG,
+            CodecPreference.FRAME_BASED,
+            CodecPreference.H264,
+            CodecPreference.H265,
+        ],
+        default=CodecPreference.AUTO,
+    )
     parser.add_argument("--format-index", type=int, help="Still image format index")
     parser.add_argument("--frame-index", type=int, help="Still image frame index")
     parser.add_argument("--compression-index", type=int, default=1, help="Still image compression index")

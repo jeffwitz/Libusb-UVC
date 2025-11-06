@@ -164,6 +164,9 @@ class CodecPreference(str):
     AUTO = "auto"
     YUYV = "yuyv"
     MJPEG = "mjpeg"
+    FRAME_BASED = "frame-based"
+    H264 = "h264"
+    H265 = "h265"
 
 
 class DecoderPreference(str):
@@ -1006,11 +1009,27 @@ def resolve_stream_preference(
 ) -> Tuple[StreamFormat, FrameInfo]:
     """Select a (format, frame) tuple based on resolution and codec preference.
 
-    ``codec`` may be ``auto`` (YUYV first, then MJPEG), ``yuyv`` or ``mjpeg``.
-    Raises :class:`UVCError` if the requested combination does not exist.
+    ``codec`` may be one of ``auto`` (YUYV → MJPEG → frame-based), ``yuyv``,
+    ``mjpeg``, ``frame-based``, ``h264`` or ``h265``.  The frame-based variants
+    filter UVC ``VS_FORMAT_FRAME_BASED`` descriptors, matching on the reported
+    description when a specific codec is requested. Raises
+    :class:`UVCError` if the requested combination does not exist.
     """
 
     codec = codec.lower()
+
+    def _frame_based_predicate(target: str):
+        target = target.lower()
+
+        def _predicate(fmt: StreamFormat) -> bool:
+            desc = (fmt.description or "").lower()
+            if target == CodecPreference.H264:
+                return "264" in desc
+            if target == CodecPreference.H265:
+                return "265" in desc or "hevc" in desc
+            return True
+
+        return _predicate
 
     def _find(subtype: int) -> Optional[Tuple[StreamFormat, FrameInfo]]:
         match = interface.find_frame(width, height, subtype=subtype)
@@ -1020,16 +1039,54 @@ def resolve_stream_preference(
             return None
         return interface.find_frame(0, 0, subtype=subtype)
 
-    order: List[int] = []
+    def _frame_based_predicate(target: str):
+        target = target.lower()
+
+        def _predicate(fmt: StreamFormat) -> bool:
+            desc = (fmt.description or "").lower()
+            if target == CodecPreference.H264:
+                return "264" in desc
+            if target == CodecPreference.H265:
+                return "265" in desc or "hevc" in desc
+            return True
+
+        return _predicate
+
+    def _find_frame_based(predicate=None) -> Optional[Tuple[StreamFormat, FrameInfo]]:
+        for fmt in interface.formats:
+            if fmt.subtype != VS_FORMAT_FRAME_BASED:
+                continue
+            if predicate and not predicate(fmt):
+                continue
+            match = interface.find_frame(width, height, format_index=fmt.format_index)
+            if match is None and width and height:
+                continue
+            if match is None:
+                match = interface.find_frame(0, 0, format_index=fmt.format_index)
+            if match is not None:
+                return match
+        return None
+
+    if codec in (CodecPreference.H264, CodecPreference.H265, CodecPreference.FRAME_BASED):
+        predicate = None if codec == CodecPreference.FRAME_BASED else _frame_based_predicate(codec)
+        match = _find_frame_based(predicate)
+        if match is not None:
+            return match
+        raise UVCError(f"Requested codec '{codec}' not available for this interface")
+
+    order: List[int]
     if codec == CodecPreference.YUYV:
         order = [VS_FORMAT_UNCOMPRESSED]
     elif codec == CodecPreference.MJPEG:
         order = [VS_FORMAT_MJPEG]
     else:
-        order = [VS_FORMAT_UNCOMPRESSED, VS_FORMAT_MJPEG]
+        order = [VS_FORMAT_UNCOMPRESSED, VS_FORMAT_MJPEG, VS_FORMAT_FRAME_BASED]
 
     for subtype in order:
-        match = _find(subtype)
+        if subtype == VS_FORMAT_FRAME_BASED:
+            match = _find_frame_based()
+        else:
+            match = _find(subtype)
         if match is not None:
             return match
 
@@ -1075,11 +1132,14 @@ def resolve_still_preference(
 
     def _collect(
         subtype: Optional[int],
+        predicate: Optional[Callable[[StreamFormat], bool]] = None,
     ) -> Optional[Tuple[StreamFormat, Union[FrameInfo, StillFrameInfo]]]:
         method1: List[Tuple[StreamFormat, FrameInfo]] = []
         method2: List[Tuple[StreamFormat, StillFrameInfo]] = []
         for fmt in interface.formats:
             if subtype is not None and fmt.subtype != subtype:
+                continue
+            if predicate and not predicate(fmt):
                 continue
             for frame in fmt.frames:
                 if frame.supports_still:
@@ -1092,16 +1152,26 @@ def resolve_still_preference(
             return match
         return _match_candidates(method2)
 
-    codec_order: List[int]
+    codec_filters: List[Tuple[Optional[int], Optional[Callable[[StreamFormat], bool]]]]
     if codec == CodecPreference.YUYV:
-        codec_order = [VS_FORMAT_UNCOMPRESSED]
+        codec_filters = [(VS_FORMAT_UNCOMPRESSED, None)]
     elif codec == CodecPreference.MJPEG:
-        codec_order = [VS_FORMAT_MJPEG]
+        codec_filters = [(VS_FORMAT_MJPEG, None)]
+    elif codec == CodecPreference.FRAME_BASED:
+        codec_filters = [(VS_FORMAT_FRAME_BASED, None)]
+    elif codec == CodecPreference.H264:
+        codec_filters = [(VS_FORMAT_FRAME_BASED, _frame_based_predicate(codec))]
+    elif codec == CodecPreference.H265:
+        codec_filters = [(VS_FORMAT_FRAME_BASED, _frame_based_predicate(codec))]
     else:
-        codec_order = [VS_FORMAT_UNCOMPRESSED, VS_FORMAT_MJPEG]
+        codec_filters = [
+            (VS_FORMAT_UNCOMPRESSED, None),
+            (VS_FORMAT_MJPEG, None),
+            (VS_FORMAT_FRAME_BASED, None),
+        ]
 
-    for subtype in codec_order:
-        match = _collect(subtype)
+    for subtype, predicate in codec_filters:
+        match = _collect(subtype, predicate)
         if match is not None:
             return match
 
@@ -2146,23 +2216,51 @@ class UVCCamera:
         codec: str,
     ) -> List[Tuple[StreamFormat, Union[FrameInfo, StillFrameInfo]]]:
         codec = codec.lower()
+        def _frame_based_predicate(target: str):
+            target = target.lower()
+
+            def _predicate(fmt: StreamFormat) -> bool:
+                desc = (fmt.description or "").lower()
+                if target == CodecPreference.H264:
+                    return "264" in desc
+                if target == CodecPreference.H265:
+                    return "265" in desc or "hevc" in desc
+                return True
+
+            return _predicate
+
         if codec == CodecPreference.YUYV:
-            subtype_order = [VS_FORMAT_UNCOMPRESSED]
+            filters = [(VS_FORMAT_UNCOMPRESSED, None)]
             include_remaining = False
         elif codec == CodecPreference.MJPEG:
-            subtype_order = [VS_FORMAT_MJPEG]
+            filters = [(VS_FORMAT_MJPEG, None)]
+            include_remaining = False
+        elif codec == CodecPreference.FRAME_BASED:
+            filters = [(VS_FORMAT_FRAME_BASED, None)]
+            include_remaining = False
+        elif codec == CodecPreference.H264:
+            filters = [(VS_FORMAT_FRAME_BASED, _frame_based_predicate(codec))]
+            include_remaining = False
+        elif codec == CodecPreference.H265:
+            filters = [(VS_FORMAT_FRAME_BASED, _frame_based_predicate(codec))]
             include_remaining = False
         else:
-            subtype_order = [VS_FORMAT_MJPEG, VS_FORMAT_UNCOMPRESSED]
+            filters = [
+                (VS_FORMAT_MJPEG, None),
+                (VS_FORMAT_UNCOMPRESSED, None),
+                (VS_FORMAT_FRAME_BASED, None),
+            ]
             include_remaining = True
 
         seen: set = set()
         result: List[Tuple[StreamFormat, Union[FrameInfo, StillFrameInfo]]] = []
 
-        def _add_for_subtype(subtype: Optional[int]) -> None:
+        def _add_for_subtype(subtype: Optional[int], predicate=None) -> None:
             subset: List[Tuple[StreamFormat, Union[FrameInfo, StillFrameInfo]]] = []
             for fmt in self.interface.formats:
                 if subtype is not None and fmt.subtype != subtype:
+                    continue
+                if predicate and not predicate(fmt):
                     continue
                 for still in fmt.still_frames:
                     key = self._still_candidate_key(fmt, still)
@@ -2181,8 +2279,8 @@ class UVCCamera:
             subset.sort(key=lambda item: item[1].width * item[1].height, reverse=True)
             result.extend(subset)
 
-        for subtype in subtype_order:
-            _add_for_subtype(subtype)
+        for subtype, predicate in filters:
+            _add_for_subtype(subtype, predicate)
 
         if include_remaining:
             _add_for_subtype(None)

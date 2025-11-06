@@ -13,7 +13,7 @@ options:
 
 * ``--width`` / ``--height`` — target frame size.
 * ``--fps`` — desired frame rate; combine with ``--strict-fps`` to enforce exact matches.
-* ``--codec`` — choose ``auto``, ``mjpeg``, or ``yuyv``.
+* ``--codec`` — choose ``auto``, ``yuyv``, ``mjpeg``, ``frame-based``, ``h264``, or ``h265``.
 * ``--decoder`` — select the decoder backend (``auto``, ``none``, ``pyav``, ``gstreamer``).  Picking one explicitly
   routes MJPEG through that backend as well, which lets you validate PyAV or
   GStreamer without H.264 hardware.  The bundled GStreamer pipeline already

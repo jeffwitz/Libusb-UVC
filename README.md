@@ -158,6 +158,10 @@ already handles MJPEG, H.264, and H.265 (``jpegdec``/``avdec_h26*``) while
 PyAV provides software MJPEG + H.264/HEVC decoding.  Leave the option at
 ``auto`` (the default) to keep the blazing-fast legacy paths.
 
+To request a specific stream codec, use ``--codec``.  Besides ``auto``, ``yuyv``
+and ``mjpeg``, the helpers now accept ``frame-based``, ``h264`` and ``h265`` to
+target UVC frame-based formats.
+
 For a scripted example that also toggles the LED after a delay, see `examples/uvc_led_preview.py`.
 
 To play with manual exposure, try `examples/exposure_sweep.py`, which disables auto exposure and sweeps `Exposure Time, Absolute` from its minimum to maximum over 300 frames while overlaying the current value on the preview window.

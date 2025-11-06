@@ -93,7 +93,18 @@ def main() -> int:
     parser.add_argument("--width", type=int, required=True, help="Desired frame width")
     parser.add_argument("--height", type=int, required=True, help="Desired frame height")
     parser.add_argument("--fps", type=float, default=15.0, help="Target frame rate in Hz")
-    parser.add_argument("--codec", choices=[CodecPreference.AUTO, CodecPreference.YUYV, CodecPreference.MJPEG], default=CodecPreference.AUTO)
+    parser.add_argument(
+        "--codec",
+        choices=[
+            CodecPreference.AUTO,
+            CodecPreference.YUYV,
+            CodecPreference.MJPEG,
+            CodecPreference.FRAME_BASED,
+            CodecPreference.H264,
+            CodecPreference.H265,
+        ],
+        default=CodecPreference.AUTO,
+    )
     parser.add_argument("--skip-frames", type=int, default=2, help="Frames to discard before saving")
     parser.add_argument("--timeout", type=int, default=5000, help="Capture timeout in milliseconds")
     parser.add_argument("--output", type=Path, required=True, help="Destination file (e.g. frame.jpg)")

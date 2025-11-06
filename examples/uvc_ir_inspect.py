@@ -146,7 +146,14 @@ def main() -> int:
     parser.add_argument("--fps", type=float, default=15.0, help="Target IR frame rate")
     parser.add_argument(
         "--codec",
-        choices=[CodecPreference.AUTO, CodecPreference.YUYV, CodecPreference.MJPEG],
+        choices=[
+            CodecPreference.AUTO,
+            CodecPreference.YUYV,
+            CodecPreference.MJPEG,
+            CodecPreference.FRAME_BASED,
+            CodecPreference.H264,
+            CodecPreference.H265,
+        ],
         default=CodecPreference.YUYV,
         help="Preferred codec when configuring the IR stream",
     )

@@ -40,7 +40,14 @@ def main() -> int:
     parser.add_argument("--timeout", type=int, default=5000, help="Capture timeout in milliseconds")
     parser.add_argument(
         "--codec",
-        choices=[CodecPreference.AUTO, CodecPreference.YUYV, CodecPreference.MJPEG],
+        choices=[
+            CodecPreference.AUTO,
+            CodecPreference.YUYV,
+            CodecPreference.MJPEG,
+            CodecPreference.FRAME_BASED,
+            CodecPreference.H264,
+            CodecPreference.H265,
+        ],
         default=CodecPreference.AUTO,
         help="Preferred codec",
     )
