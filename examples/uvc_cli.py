@@ -140,10 +140,19 @@ def apply_device_filters(args) -> None:
 
 
 def resolve_device_index(args) -> None:
-    """Resolve --device-sn or --device-path into a concrete device index."""
+    """Resolve device selection flags into a concrete device index."""
 
-    needs_resolution = bool(getattr(args, "device_sn", None) or getattr(args, "device_path", None))
-    if not needs_resolution:
+    target_sn = getattr(args, "device_sn", None)
+    target_path = getattr(args, "device_path", None)
+    identity_filters = bool(target_sn or target_path)
+    has_vid_pid = args.vid is not None or args.pid is not None
+
+    # Nothing to do if the caller explicitly set an index and provided no extra identity filters.
+    if args.device_index is not None and not identity_filters:
+        return
+
+    if not has_vid_pid:
+        # Without VID/PID we cannot filter deterministically; leave selection to device_index.
         return
 
     try:
@@ -152,15 +161,18 @@ def resolve_device_index(args) -> None:
     except Exception as exc:  # pragma: no cover - import guard
         raise RuntimeError("libusb_uvc must be importable before resolving device identity") from exc
 
-    if args.vid is None or args.pid is None:
-        raise RuntimeError("--device-sn/--device-path require a VID/PID filter")
-
     devices = find_uvc_devices(args.vid, args.pid)
     if not devices:
         raise RuntimeError("No devices found for the requested VID/PID")
 
-    target_sn = getattr(args, "device_sn", None)
-    target_path = getattr(args, "device_path", None)
+    if not identity_filters:
+        if len(devices) == 1:
+            args.device_index = 0
+            return
+        raise RuntimeError(
+            "Multiple devices share this VID/PID; supply --device-index, --device-sn or --device-path"
+        )
+
     bus_expected = None
     ports_expected: Optional[Tuple[int, ...]] = None
     if target_path is not None:

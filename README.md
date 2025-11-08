@@ -281,7 +281,7 @@ The stream iterator handles all PROBE/COMMIT steps, asynchronous transfers, and 
 
 ## Roadmap / To Do
 
-- **Compressed payload support (H.264/H.265/AV1/VP8):** the toolkit still focuses on uncompressed and MJPEG streams; adding the modern codecs means parsing their payload headers, negotiating format-specific controls, and integrating decoders.
+- **Expanded codec coverage (AV1/VP8, lossless modes):** H.264/H.265 payloads are already supported end-to-end, but emerging formats (AV1, VP8/VP9, vendor lossless profiles) still need probing/decoder backends.
 - **Still-image pipeline hardening:** Method 1 and Method 2 negotiation work, but we still need per-device quirks for multi-sensor rigs, vendor compression indices, and bulk-only endpoints so captures succeed without manual tweaking.
 - **Control coverage & vendor quirks:** even when a control is advertised (for example an IR torch selector), firmwares often expect vendor-specific messages. Mapping them reliably demands per-device investigation or reverse engineering before they can become first-class features in the toolkit.
 
