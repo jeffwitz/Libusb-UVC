@@ -504,7 +504,7 @@ class ExtensionUnit(UVCUnit):
 class CapturedFrame:
     """Container returned by :meth:`UVCCamera.read_frame` and asynchronous streams."""
 
-    payload: bytes
+    payload: Union[bytes, bytearray]
     format: StreamFormat
     frame: Union[FrameInfo, StillFrameInfo]
     fid: int
@@ -535,6 +535,153 @@ class CapturedFrame:
             raise RuntimeError("OpenCV is required for BGR conversion") from exc
         rgb = self.to_rgb()
         return cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+
+
+@dataclasses.dataclass
+class FrameAssemblyResult:
+    """Result produced by :class:`FrameReassembler` for each completed frame."""
+
+    payload: Optional[bytearray]
+    fid: Optional[int]
+    pts: Optional[int]
+    reason: str
+    error: bool = False
+    duration: Optional[float] = None
+
+
+@dataclasses.dataclass
+class StreamStats:
+    """Cumulative counters describing a stream's behaviour."""
+
+    frames_completed: int = 0
+    frames_dropped: int = 0
+    bytes_delivered: int = 0
+    last_frame_duration_s: Optional[float] = None
+    average_frame_duration_s: Optional[float] = None
+    measured_frames: int = 0
+    last_drop_reason: Optional[str] = None
+
+
+class FrameReassembler:
+    """Stateful helper that converts UVC packets into complete frame payloads."""
+
+    def __init__(
+        self,
+        *,
+        expected_size: Optional[int],
+        max_payload_size: Optional[int] = None,
+        packet_limit: Optional[int] = None,
+    ) -> None:
+        self._expected_size = expected_size
+        if packet_limit is not None:
+            self._packet_limit = packet_limit
+        elif expected_size and max_payload_size:
+            self._packet_limit = max(4, (expected_size // max_payload_size) + 16)
+        else:
+            self._packet_limit = None
+        self._buffer = bytearray()
+        self._current_fid: Optional[int] = None
+        self._current_pts: Optional[int] = None
+        self._frame_error = False
+        self._packets_seen = 0
+        self._frame_started_at: Optional[float] = None
+
+    def feed(self, packet: bytes) -> List[FrameAssemblyResult]:
+        results: List[FrameAssemblyResult] = []
+        if not packet:
+            return results
+
+        header_len = packet[0]
+        if header_len < 2 or header_len > len(packet):
+            result = self._finalize("bad-header")
+            if result:
+                results.append(result)
+            return results
+
+        flags = packet[1]
+        fid = flags & BH_FID
+        eof = bool(flags & BH_EOF)
+        err = bool(flags & BH_ERR)
+        payload = packet[header_len:]
+
+        if self._current_fid is None:
+            self._start_frame(fid, err)
+        elif fid != self._current_fid:
+            result = self._finalize("fid-toggle")
+            if result:
+                results.append(result)
+            self._start_frame(fid, err)
+        elif err:
+            self._frame_error = True
+
+        if flags & BH_PTS and header_len >= 6:
+            self._current_pts = int.from_bytes(packet[2:6], "little")
+
+        if payload:
+            self._buffer.extend(payload)
+
+        self._packets_seen += 1
+        if self._expected_size is not None and len(self._buffer) > self._expected_size:
+            self._frame_error = True
+
+        if self._packet_limit and self._packets_seen > self._packet_limit:
+            result = self._finalize("packet-limit")
+            if result:
+                results.append(result)
+            return results
+
+        if eof:
+            result = self._finalize("eof")
+            if result:
+                results.append(result)
+
+        return results
+
+    def _start_frame(self, fid: int, err: bool) -> None:
+        self._frame_started_at = time.monotonic()
+        self._buffer = bytearray()
+        self._current_fid = fid
+        self._frame_error = err
+        self._packets_seen = 0
+        self._current_pts = None
+
+    def _reset_state(self) -> None:
+        self._buffer = bytearray()
+        self._current_fid = None
+        self._frame_error = False
+        self._current_pts = None
+        self._packets_seen = 0
+        self._frame_started_at = None
+
+    def _finalize(self, reason: str) -> Optional[FrameAssemblyResult]:
+        if self._current_fid is None:
+            self._reset_state()
+            return None
+
+        payload: Optional[bytearray] = None
+        error = self._frame_error
+        duration = None
+        if self._frame_started_at is not None:
+            duration = max(0.0, time.monotonic() - self._frame_started_at)
+
+        if not error and self._buffer:
+            if self._expected_size is not None and len(self._buffer) != self._expected_size:
+                error = True
+            else:
+                payload = self._buffer
+        else:
+            error = True
+
+        result = FrameAssemblyResult(
+            payload=payload,
+            fid=self._current_fid,
+            pts=self._current_pts,
+            reason=reason,
+            error=error or payload is None,
+            duration=duration,
+        )
+        self._reset_state()
+        return result
 
 
 @dataclasses.dataclass
@@ -1601,6 +1748,7 @@ class UVCCamera:
         self._still_allow_fallback: bool = False
         self._still_requested_compression: int = 1
         self._still_requested_codec: str = CodecPreference.AUTO
+        self._sync_stats = StreamStats()
 
         vc_interface = None
         for cfg in device:
@@ -3034,10 +3182,11 @@ class UVCCamera:
             )
         ):
             expected_size = None
-        frame_bytes = bytearray()
-        current_fid: Optional[int] = None
-        err_seen = False
-        packets_seen = 0
+
+        reassembler = FrameReassembler(
+            expected_size=expected_size,
+            max_payload_size=self._max_payload,
+        )
         start_time = time.monotonic()
         overall_deadline = None
         if overall_timeout_ms is not None and overall_timeout_ms > 0:
@@ -3062,102 +3211,44 @@ class UVCCamera:
             if not packet:
                 continue
 
-            header_len = packet[0]
-            if header_len < 2 or header_len > len(packet):
-                frame_bytes.clear()
-                current_fid = None
-                err_seen = False
-                packets_seen = 0
-                continue
-
-            flags = packet[1]
-            payload = packet[header_len:]
-            fid = flags & BH_FID
-            eof = bool(flags & BH_EOF)
-
-            if flags & BH_ERR:
-                err_seen = True
-
-            if current_fid is None:
-                current_fid = fid
-                frame_bytes.clear()
-                err_seen = bool(flags & BH_ERR)
-                packets_seen = 0
-            elif fid != current_fid:
+            for result in reassembler.feed(packet):
                 if (
-                    self._format is not None
-                    and self._frame is not None
-                    and not err_seen
-                    and (expected_size is None or len(frame_bytes) == expected_size)
+                    result.payload is None
+                    or result.error
+                    or self._format is None
+                    or self._frame is None
                 ):
-                    payload_bytes = bytes(frame_bytes)
-                    decoded = _decode_payload_once(self._format, payload_bytes)
-                    return CapturedFrame(
-                        payload=payload_bytes,
-                        format=self._format,
-                        frame=self._frame,
-                        fid=current_fid,
-                        pts=None,
-                        decoded=decoded,
-                    )
-                frame_bytes.clear()
-                current_fid = fid
-                err_seen = bool(flags & BH_ERR)
-                packets_seen = 0
-
-            if payload:
-                frame_bytes.extend(payload)
-            packets_seen += 1
-
-            if expected_size and self._max_payload:
-                max_packets = max(4, (expected_size // self._max_payload) + 16)
-                if packets_seen > max_packets:
-                    LOG.debug(
-                        "Abandoning frame after %s packets (expected <=%s)",
-                        packets_seen,
-                        max_packets,
-                    )
-                    frame_bytes.clear()
-                    current_fid = None
-                    err_seen = False
-                    packets_seen = 0
+                    self._sync_stats.frames_dropped += 1
+                    self._sync_stats.last_drop_reason = result.reason
                     continue
+                decoded = _decode_payload_once(self._format, result.payload)
+                size = len(result.payload)
+                self._sync_stats.frames_completed += 1
+                self._sync_stats.bytes_delivered += size
+                if result.duration is not None:
+                    self._sync_stats.last_frame_duration_s = result.duration
+                    samples = self._sync_stats.measured_frames
+                    if samples == 0 or self._sync_stats.average_frame_duration_s is None:
+                        self._sync_stats.average_frame_duration_s = result.duration
+                    else:
+                        prev = self._sync_stats.average_frame_duration_s
+                        self._sync_stats.average_frame_duration_s = (
+                            prev * samples + result.duration
+                        ) / (samples + 1)
+                    self._sync_stats.measured_frames = samples + 1
+                return CapturedFrame(
+                    payload=result.payload,
+                    format=self._format,
+                    frame=self._frame,
+                    fid=result.fid if result.fid is not None else 0,
+                    pts=result.pts,
+                    decoded=decoded,
+                )
 
-            if not eof:
-                continue
+    def get_stream_stats(self) -> StreamStats:
+        """Return a snapshot of synchronous capture statistics."""
 
-            if (
-                self._format is None
-                or self._frame is None
-                or err_seen
-                or (expected_size is not None and len(frame_bytes) != expected_size)
-            ):
-                frame_bytes.clear()
-                current_fid = None
-                err_seen = False
-                packets_seen = 0
-                continue
-
-            pts = None
-            if flags & BH_PTS and header_len >= 6:
-                pts = int.from_bytes(packet[2:6], "little")
-
-            payload_bytes = bytes(frame_bytes)
-            decoded = _decode_payload_once(self._format, payload_bytes)
-            result = CapturedFrame(
-                payload=payload_bytes,
-                format=self._format,
-                frame=self._frame,
-                fid=current_fid,
-                pts=pts,
-                decoded=decoded,
-            )
-
-            frame_bytes.clear()
-            current_fid = None
-            err_seen = False
-            packets_seen = 0
-            return result
+        return dataclasses.replace(self._sync_stats)
 
 
 # ---------------------------------------------------------------------------
@@ -3261,7 +3352,7 @@ def _parse_probe_payload(payload: bytes) -> dict:
 
 def _decode_payload_once(
     format_descriptor: Optional[StreamFormat],
-    payload: bytes,
+    payload: Union[bytes, bytearray],
     decoder_order: Optional[List[str]] = None,
 ) -> Optional[object]:
     if format_descriptor is None or format_descriptor.subtype != VS_FORMAT_FRAME_BASED:
@@ -3274,8 +3365,10 @@ def _decode_payload_once(
     except DecoderUnavailable:
         return None
     try:
-        frames = decoder.decode_packet(payload)
-        frames.extend(decoder.flush())
+        data = payload if isinstance(payload, bytes) else bytes(payload)
+        with decoder:
+            frames = decoder.decode_packet(data)
+            frames.extend(decoder.flush())
     except Exception as exc:  # pragma: no cover - backend dependent
         LOG.warning("On-demand decoder failed: %s", exc)
         return None
@@ -3334,11 +3427,7 @@ class FrameStream:
         self._active = False
         self._start_time = 0.0
         self._sequence = 0
-
-        self._frame_bytes = bytearray()
-        self._current_fid: Optional[int] = None
-        self._frame_error = False
-        self._current_pts: Optional[int] = None
+        self._stats = StreamStats()
 
         is_mjpeg = stream_format.subtype == VS_FORMAT_MJPEG or "MJPG" in stream_format.description.upper()
         is_frame_based = stream_format.subtype == VS_FORMAT_FRAME_BASED
@@ -3349,6 +3438,7 @@ class FrameStream:
             if is_mjpeg or is_frame_based
             else frame.max_frame_size or (frame.width * frame.height * 2)
         )
+        self._reassembler = FrameReassembler(expected_size=self._expected_size)
 
         self._decoder = None
         self._decoder_failed = False
@@ -3381,6 +3471,7 @@ class FrameStream:
         )
         LOG.debug("FrameStream negotiation: %s", negotiation)
 
+        self._reassembler = FrameReassembler(expected_size=self._expected_size)
         self._camera.start_async_stream(
             self._on_packet,
             transfers=self._transfers,
@@ -3430,10 +3521,17 @@ class FrameStream:
 
         self._camera.stop_async_stream()
         self._camera.stop_streaming()
+        self._release_decoder()
 
         if self._poll_thread is not None:
             self._poll_thread.join(timeout=0.5)
             self._poll_thread = None
+
+    @property
+    def stats(self) -> StreamStats:
+        """Return a snapshot of the accumulated stream statistics."""
+
+        return dataclasses.replace(self._stats)
 
     def _poll_loop(self) -> None:
         while not self._stop_event.is_set():
@@ -3454,9 +3552,22 @@ class FrameStream:
             except queue.Full:
                 LOG.debug("FrameStream queue full; dropping frame %s", frame.sequence)
 
+    def _release_decoder(self) -> None:
+        if self._decoder is None:
+            return
+        try:
+            self._decoder.close()
+        except Exception:  # pragma: no cover - best-effort cleanup
+            LOG.debug("Decoder backend close() failed", exc_info=True)
+        self._decoder = None
+        self._decoder_backend_name = None
+        self._decoder_backend_key = None
+
     def _install_decoder(self, *, initial: bool = False) -> None:
         if not self._decoder_applicable or self._decoder_order is None:
             return
+        if self._decoder is not None:
+            self._release_decoder()
 
         if self._decoder_order:
             candidates = [name for name in self._decoder_order if name not in self._decoder_failures]
@@ -3513,7 +3624,7 @@ class FrameStream:
         else:
             LOG.info("Decoder backend switched to %s for %s", label, self._format.description)
 
-    def _decode_payload(self, payload: bytes) -> Optional[object]:
+    def _decode_payload(self, payload: Union[bytes, bytearray]) -> Optional[object]:
         if not self._decoder_applicable or self._decoder_order is None:
             return None
         if self._decoder is None and not self._decoder_exhausted:
@@ -3521,16 +3632,16 @@ class FrameStream:
         if not self._decoder or self._decoder_failed or self._decoder_exhausted:
             return None
         try:
-            frames = self._decoder.decode_packet(payload)
+            data = payload if isinstance(payload, bytes) else bytes(payload)
+            frames = self._decoder.decode_packet(data)
         except Exception as exc:  # pragma: no cover - backend dependent
             backend_label = self._decoder_backend_name or type(self._decoder).__name__
+            backend_key = self._decoder_backend_key
             LOG.warning("Decoder backend %s failed: %s", backend_label, exc)
-            if self._decoder_backend_key:
-                self._decoder_failures.add(self._decoder_backend_key)
+            if backend_key:
+                self._decoder_failures.add(backend_key)
             self._decoder_failed = True
-            self._decoder = None
-            self._decoder_backend_name = None
-            self._decoder_backend_key = None
+            self._release_decoder()
             if not self._decoder_exhausted:
                 self._install_decoder()
             return None
@@ -3540,84 +3651,69 @@ class FrameStream:
             LOG.debug("Decoder produced %s frames; using the first one", len(frames))
         return frames[0]
 
-    def _finalize_frame(self, reason: str) -> None:
-        if self._current_fid is None:
+    def _handle_frame_result(self, result: FrameAssemblyResult) -> None:
+        size = len(result.payload) if result.payload else 0
+        if result.payload is None or result.error:
+            self._stats.frames_dropped += 1
+            self._stats.last_drop_reason = result.reason
+            LOG.debug(
+                "FrameStream dropped frame (reason=%s size=%s)",
+                result.reason,
+                size,
+            )
             return
 
-        if not self._frame_error and self._frame_bytes:
-            if self._skip_initial > 0:
-                self._skip_initial -= 1
-            else:
-                self._sequence += 1
-                decoded = self._decode_payload(bytes(self._frame_bytes))
-                frame = CapturedFrame(
-                    payload=bytes(self._frame_bytes),
-                    format=self._format,
-                    frame=self._frame,
-                    fid=self._current_fid,
-                    pts=self._current_pts,
-                    timestamp=time.time(),
-                    sequence=self._sequence,
-                    decoded=decoded,
-                )
-                LOG.debug(
-                    "FrameStream accepted frame #%s (reason=%s size=%s)",
-                    frame.sequence,
-                    reason,
-                    len(self._frame_bytes),
-                )
-                self._enqueue(frame)
-        else:
+        if self._skip_initial > 0:
+            self._skip_initial -= 1
+            self._stats.frames_dropped += 1
+            self._stats.last_drop_reason = "skip-initial"
             LOG.debug(
-                "FrameStream dropped frame (reason=%s error=%s size=%s)",
-                reason,
-                self._frame_error,
-                len(self._frame_bytes),
+                "Skipping initial frame (remaining=%s size=%s)",
+                self._skip_initial,
+                size,
             )
+            return
 
-        self._frame_bytes.clear()
-        self._frame_error = False
-        self._current_fid = None
-        self._current_pts = None
+        self._stats.frames_completed += 1
+        self._stats.bytes_delivered += size
+        if result.duration is not None:
+            self._stats.last_frame_duration_s = result.duration
+            samples = self._stats.measured_frames
+            if samples == 0 or self._stats.average_frame_duration_s is None:
+                self._stats.average_frame_duration_s = result.duration
+            else:
+                prev = self._stats.average_frame_duration_s
+                self._stats.average_frame_duration_s = (
+                    prev * samples + result.duration
+                ) / (samples + 1)
+            self._stats.measured_frames = samples + 1
+
+        self._sequence += 1
+        decoded = self._decode_payload(result.payload)
+        frame = CapturedFrame(
+            payload=result.payload,
+            format=self._format,
+            frame=self._frame,
+            fid=result.fid if result.fid is not None else 0,
+            pts=result.pts,
+            timestamp=time.time(),
+            sequence=self._sequence,
+            decoded=decoded,
+        )
+        LOG.debug(
+            "FrameStream accepted frame #%s (reason=%s size=%s)",
+            frame.sequence,
+            result.reason,
+            size,
+        )
+        self._enqueue(frame)
 
     def _on_packet(self, packet: bytes) -> None:
         if not self._active or not packet:
             return
 
-        header_len = packet[0]
-        if header_len < 2 or header_len > len(packet):
-            self._frame_error = True
-            return
-
-        flags = packet[1]
-        payload = packet[header_len:]
-
-        if flags & BH_PTS and header_len >= 6:
-            self._current_pts = int.from_bytes(packet[2:6], "little")
-
-        fid = flags & BH_FID
-        eof = bool(flags & BH_EOF)
-        err = bool(flags & BH_ERR)
-
-        if self._current_fid is None:
-            self._current_fid = fid
-            self._frame_bytes.clear()
-            self._frame_error = err
-        elif fid != self._current_fid:
-            self._finalize_frame("fid-toggle")
-            self._current_fid = fid
-
-        if err:
-            self._frame_error = True
-
-        if payload:
-            self._frame_bytes.extend(payload)
-
-        if self._expected_size is not None and len(self._frame_bytes) > self._expected_size:
-            self._frame_error = True
-
-        if eof:
-            self._finalize_frame("eof")
+        for result in self._reassembler.feed(packet):
+            self._handle_frame_result(result)
 
 def yuy2_to_rgb(payload: bytes, width: int, height: int):
     """Convert a single YUY2 frame into an RGB ``numpy.ndarray``.
@@ -4229,6 +4325,7 @@ class UVCControlsManager:
 __all__ = [
     "AltSettingInfo",
     "CapturedFrame",
+    "StreamStats",
     "FrameInfo",
     "StreamFormat",
     "StreamingInterface",

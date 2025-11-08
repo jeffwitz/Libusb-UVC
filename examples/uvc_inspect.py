@@ -5,67 +5,76 @@ from __future__ import annotations
 
 import argparse
 import logging
-import pathlib
-import sys
 from typing import Dict, Optional
 
 import usb.core
 import usb.util
 
-ROOT = pathlib.Path(__file__).resolve().parents[1]
-try:
-    from libusb_uvc import (
-        GET_CUR,
-        GET_DEF,
-        GET_INFO,
-        GET_MAX,
-        GET_MIN,
-        GET_RES,
-        ControlEntry,
-        UVCCamera,
-        UVCControlsManager,
-        UVCError,
-        claim_vc_interface,
-        describe_device,
-        find_uvc_devices,
-        list_control_units,
-        list_streaming_interfaces,
-        probe_streaming_interface,
-        select_format_and_frame,
-        CodecPreference,
-        CapturedFrame,
-        VS_FORMAT_MJPEG,
-        VS_FORMAT_UNCOMPRESSED,
-        StreamingInterface,
-    )
-except ImportError:  # pragma: no cover
-    sys.path.insert(0, str(ROOT / "src"))
-    from libusb_uvc import (
-        GET_CUR,
-        GET_DEF,
-        GET_INFO,
-        GET_MAX,
-        GET_MIN,
-        GET_RES,
-        ControlEntry,
-        UVCCamera,
-        UVCControlsManager,
-        UVCError,
-        claim_vc_interface,
-        describe_device,
-        find_uvc_devices,
-        list_control_units,
-        list_streaming_interfaces,
-        probe_streaming_interface,
-        select_format_and_frame,
-        CodecPreference,
-        CapturedFrame,
-        VS_FORMAT_MJPEG,
-        VS_FORMAT_UNCOMPRESSED,
-        StreamingInterface,
-    )
+from uvc_cli import (
+    add_device_arguments,
+    apply_device_filters,
+    ensure_repo_import,
+    resolve_device_index,
+)
+
+ensure_repo_import()
+from libusb_uvc import (  # type: ignore  # pylint: disable=wrong-import-position
+    GET_CUR,
+    GET_DEF,
+    GET_INFO,
+    GET_MAX,
+    GET_MIN,
+    GET_RES,
+    CapturedFrame,
+    CodecPreference,
+    ControlEntry,
+    StreamingInterface,
+    UVCCamera,
+    UVCControlsManager,
+    UVCError,
+    VS_FORMAT_MJPEG,
+    VS_FORMAT_UNCOMPRESSED,
+    claim_vc_interface,
+    describe_device,
+    find_uvc_devices,
+    list_control_units,
+    list_streaming_interfaces,
+    probe_streaming_interface,
+    select_format_and_frame,
+)
 
 LOG = logging.getLogger("inspect_device")
+
+
+def print_device_summary(vid: Optional[int], pid: Optional[int]) -> int:
+    devices = find_uvc_devices(vid, pid)
+    if not devices:
+        print("No UVC devices detected.")
+        return 1
+
+    print("Detected UVC devices:")
+    for idx, dev in enumerate(devices):
+        desc = describe_device(dev)
+        bus = getattr(dev, "bus", "?")
+        address = getattr(dev, "address", "?")
+        ports = getattr(dev, "port_numbers", None)
+        if ports:
+            path = ".".join(str(p) for p in ports)
+        else:
+            single = getattr(dev, "port_number", None)
+            path = str(single) if single is not None else "-"
+        serial = None
+        try:
+            if dev.iSerialNumber:
+                serial = usb.util.get_string(dev, dev.iSerialNumber)
+        except Exception:
+            serial = None
+        print(f"[{idx}] {desc}")
+        print(
+            f"    VID:PID=0x{dev.idVendor:04x}:0x{dev.idProduct:04x} "
+            f"bus={bus} addr={address} path={path} serial={serial or '-'}"
+        )
+    return 0
 
 
 def _fetch_control_value(
@@ -344,8 +353,7 @@ def test_still_capture(
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Inspect UVC cameras using libusb")
-    parser.add_argument("--vid", type=lambda s: int(s, 0), help="Vendor ID (hex ok)")
-    parser.add_argument("--pid", type=lambda s: int(s, 0), help="Product ID (hex ok)")
+    add_device_arguments(parser, default_index=None)
     parser.add_argument("--probe-interface", type=int, help="Interface index to run PROBE/COMMIT on")
     parser.add_argument("--probe-format", type=int, help="Format index to select for PROBE")
     parser.add_argument("--probe-frame", type=int, help="Frame index to select for PROBE")
@@ -354,18 +362,41 @@ def main() -> int:
     parser.add_argument("--alt-setting", type=int, help="Alt setting to force on the VS interface")
     parser.add_argument("-v", "--verbose", action="store_true")
     parser.add_argument("--test-still", action="store_true", help="Attempt to capture a still frame for each VS interface")
+    parser.add_argument("--list", action="store_true", help="Only list matching devices and exit")
     args = parser.parse_args()
+
+    apply_device_filters(args)
+    if getattr(args, "device_sn", None) or getattr(args, "device_path", None):
+        resolve_device_index(args)
 
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO)
 
-    devices = find_uvc_devices(args.vid, args.pid)
+    # Default behaviour: list devices unless a specific filter or index was provided.
+    if args.list or (
+        args.vid is None
+        and args.pid is None
+        and getattr(args, "device_sn", None) is None
+        and getattr(args, "device_path", None) is None
+        and args.device_index is None
+    ):
+        return print_device_summary(args.vid, args.pid)
 
+    devices = find_uvc_devices(args.vid, args.pid)
     if not devices:
-        print("No UVC devices found.")
+        print("No matching UVC devices found.")
         return 1
 
-    for idx, dev in enumerate(devices):
-        print(f"Device: {describe_device(dev)}")
+    if args.device_index is not None:
+        indices = [args.device_index]
+    else:
+        indices = list(range(len(devices)))
+
+    for idx in indices:
+        if idx < 0 or idx >= len(devices):
+            print(f"Device index {idx} out of range (found {len(devices)})")
+            return 1
+        dev = devices[idx]
+        print(f"Device [{idx}]: {describe_device(dev)}")
 
         stream_map = list_streaming_interfaces(dev)
         still_results = None

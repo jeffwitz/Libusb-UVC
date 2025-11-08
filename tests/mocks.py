@@ -80,6 +80,24 @@ class StreamingInterfaceAdapter:
     def select_alt_for_payload(self, required_payload: int):
         return self.alt_settings[0]
 
+    def find_frame(
+        self,
+        width: int,
+        height: int,
+        *,
+        format_index: Optional[int] = None,
+        subtype: Optional[int] = None,
+    ):
+        for fmt in self.formats:
+            if format_index is not None and fmt.format_index != format_index:
+                continue
+            if subtype is not None and fmt.subtype != subtype:
+                continue
+            for frame in fmt.frames:
+                if frame.width == width and frame.height == height:
+                    return fmt, frame
+        return None
+
 
 class MockUsbDevice:
     """Drop-in replacement for :class:`usb.core.Device` backed by the emulator."""
@@ -89,6 +107,8 @@ class MockUsbDevice:
         device_info = emulator.device_info
         self.idVendor = int(device_info.get("vendor_id", 0))
         self.idProduct = int(device_info.get("product_id", 0))
+        self.bus = 1
+        self.address = 1
         self._log: List[dict] = []
 
         streaming_interface = emulator.video_streaming_interface

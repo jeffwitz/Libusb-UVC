@@ -5,39 +5,24 @@ from __future__ import annotations
 
 import argparse
 import logging
-import pathlib
-import sys
-import time
 from pathlib import Path
 
 from PIL import Image
 
-ROOT = pathlib.Path(__file__).resolve().parents[1]
-try:
-    from libusb_uvc import (
-        CodecPreference,
-        FrameInfo,
-        StreamFormat,
-        UVCCamera,
-        UVCError,
-        VS_FORMAT_MJPEG,
-        VS_FORMAT_UNCOMPRESSED,
-        decode_to_rgb,
-        describe_device,
-    )
-except ImportError:  # pragma: no cover
-    sys.path.insert(0, str(ROOT / "src"))
-    from libusb_uvc import (
-        CodecPreference,
-        FrameInfo,
-        StreamFormat,
-        UVCCamera,
-        UVCError,
-        VS_FORMAT_MJPEG,
-        VS_FORMAT_UNCOMPRESSED,
-        decode_to_rgb,
-        describe_device,
-    )
+from uvc_cli import add_device_arguments, apply_device_filters, configure_logging, ensure_repo_import, resolve_device_index
+
+ensure_repo_import()
+from libusb_uvc import (
+    CodecPreference,
+    FrameInfo,
+    StreamFormat,
+    UVCCamera,
+    UVCError,
+    VS_FORMAT_MJPEG,
+    VS_FORMAT_UNCOMPRESSED,
+    decode_to_rgb,
+    describe_device,
+)
 
 LOG = logging.getLogger("capture_frame")
 
@@ -86,10 +71,7 @@ def save_frame(output_path: Path, payload: bytes, stream_format: StreamFormat, f
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Capture a single UVC frame")
-    parser.add_argument("--vid", type=lambda x: int(x, 0), help="Vendor ID filter")
-    parser.add_argument("--pid", type=lambda x: int(x, 0), help="Product ID filter")
-    parser.add_argument("--device-index", type=int, default=0, help="Index of the matching device")
-    parser.add_argument("--interface", type=int, default=1, help="Video streaming interface number")
+    add_device_arguments(parser)
     parser.add_argument("--width", type=int, required=True, help="Desired frame width")
     parser.add_argument("--height", type=int, required=True, help="Desired frame height")
     parser.add_argument("--fps", type=float, default=15.0, help="Target frame rate in Hz")
@@ -110,8 +92,10 @@ def main() -> int:
     parser.add_argument("--output", type=Path, required=True, help="Destination file (e.g. frame.jpg)")
     parser.add_argument("--log-level", default="INFO")
     args = parser.parse_args()
+    apply_device_filters(args)
+    resolve_device_index(args)
 
-    logging.basicConfig(level=args.log_level.upper())
+    configure_logging(args.log_level, name="capture_frame")
 
     try:
         with UVCCamera.open(

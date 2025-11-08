@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from libusb_uvc import CodecPreference, UVCCamera, UVCError, StreamFormat, FrameInfo
+from libusb_uvc.core import FrameAssemblyResult, FrameStream
 
 from .mocks import MockUsbDevice, StreamingInterfaceAdapter
 from .uvc_emulator import UvcEmulatorLogic
@@ -74,6 +75,9 @@ def test_read_frame_matches_emulator_payload(camera: UVCCamera):
     expected = Path("tests/data/test_video.mjpeg").read_bytes()
     assert captured.payload.startswith(b"\xff\xd8")
     assert sha1(captured.payload) == sha1(expected)
+    stats = camera.get_stream_stats()
+    assert stats.frames_completed >= 1
+    assert stats.bytes_delivered >= len(captured.payload)
 
 
 def test_read_frame_without_configure_raises(camera: UVCCamera):
@@ -82,3 +86,34 @@ def test_read_frame_without_configure_raises(camera: UVCCamera):
     camera._endpoint_address = None  # type: ignore[attr-defined]
     with pytest.raises(UVCError):
         camera.read_frame()
+
+
+def test_frame_stream_reports_stats(camera: UVCCamera):
+    fmt, frame = camera.interface.formats[0], camera.interface.formats[0].frames[0]
+    stream = FrameStream(
+        camera=camera,
+        stream_format=fmt,
+        frame=frame,
+        frame_rate=None,
+        strict_fps=False,
+        queue_size=1,
+        skip_initial=0,
+        transfers=1,
+        packets_per_transfer=1,
+        timeout_ms=1000,
+        duration=None,
+        decoder_preference=CodecPreference.AUTO,
+    )
+    result = FrameAssemblyResult(
+        payload=bytearray(b"\x00" * 128),
+        fid=1,
+        pts=None,
+        reason="test",
+        error=False,
+        duration=0.01,
+    )
+    stream._handle_frame_result(result)
+    stats = stream.stats
+    assert stats.frames_completed == 1
+    assert stats.bytes_delivered == 128
+    assert stats.last_frame_duration_s == 0.01

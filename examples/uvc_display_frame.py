@@ -6,8 +6,6 @@ from __future__ import annotations
 import argparse
 import logging
 import os
-import pathlib
-import sys
 from pathlib import Path
 
 import matplotlib
@@ -17,22 +15,17 @@ if not os.environ.get("DISPLAY"):
 
 import matplotlib.pyplot as plt
 
-ROOT = pathlib.Path(__file__).resolve().parents[1]
-try:
-    from libusb_uvc import CodecPreference, UVCCamera, UVCError, decode_to_rgb, describe_device
-except ImportError:  # pragma: no cover
-    sys.path.insert(0, str(ROOT / "src"))
-    from libusb_uvc import CodecPreference, UVCCamera, UVCError, decode_to_rgb, describe_device
+from uvc_cli import add_device_arguments, apply_device_filters, configure_logging, ensure_repo_import, resolve_device_index
+
+ensure_repo_import()
+from libusb_uvc import CodecPreference, UVCCamera, UVCError, decode_to_rgb, describe_device
 
 LOG = logging.getLogger("display_frame")
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Capture and display a single frame")
-    parser.add_argument("--vid", type=lambda x: int(x, 0), help="Vendor ID filter")
-    parser.add_argument("--pid", type=lambda x: int(x, 0), help="Product ID filter")
-    parser.add_argument("--device-index", type=int, default=0, help="Index within the detected devices")
-    parser.add_argument("--interface", type=int, default=1, help="Video streaming interface number")
+    add_device_arguments(parser)
     parser.add_argument("--width", type=int, default=640, help="Desired frame width")
     parser.add_argument("--height", type=int, default=480, help="Desired frame height")
     parser.add_argument("--fps", type=float, default=15.0, help="Target frame rate for negotiation")
@@ -53,8 +46,10 @@ def main() -> int:
     )
     parser.add_argument("--log-level", default="INFO")
     args = parser.parse_args()
+    apply_device_filters(args)
+    resolve_device_index(args)
 
-    logging.basicConfig(level=args.log_level.upper())
+    configure_logging(args.log_level, name="display_frame")
 
     try:
         with UVCCamera.open(

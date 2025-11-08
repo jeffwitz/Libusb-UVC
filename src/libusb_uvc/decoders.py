@@ -47,6 +47,18 @@ class DecoderBackend(ABC):
 
         return []
 
+    def close(self) -> None:  # pragma: no cover - default implementation
+        """Release decoder resources."""
+
+    def __enter__(self) -> "DecoderBackend":  # pragma: no cover - convenience
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:  # pragma: no cover - convenience
+        try:
+            self.close()
+        except Exception:
+            LOG.debug("Decoder close() failed", exc_info=True)
+
 
 def _select_gstreamer_pipeline(codec: str) -> Tuple[str, Optional[str]]:
     """Return (pipeline_description, caps) for the requested codec."""
