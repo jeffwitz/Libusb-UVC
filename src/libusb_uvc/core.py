@@ -3695,7 +3695,10 @@ class FrameStream:
             )
             return
         if self._format.subtype == VS_FORMAT_MJPEG:
-            label = "GStreamer fallback" if fallback_used else "PyAV"
+            if fallback_used:
+                label = "GStreamer fallback"
+            else:
+                label = self._decoder_backend_name or type(backend).__name__
             LOG.info("Recording MJPEG payloads via %s", label)
         self._recorder = recorder
 

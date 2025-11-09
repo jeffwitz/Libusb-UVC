@@ -241,6 +241,7 @@ class _GStreamerDecoder(DecoderBackend):
         Gst.init(None)
 
         codec_name = _normalise_codec_name(format_name)
+        self._codec_name = codec_name
         pipeline_desc, caps_string = _select_gstreamer_pipeline(codec_name)
         self._caps_string = caps_string
 
@@ -394,17 +395,28 @@ class _GStreamerDecoder(DecoderBackend):
         fps: Optional[float],
     ) -> Optional[RecorderBackend]:
         try:
-            desc = (
-                "appsrc name=rec_src is-live=true format=time do-timestamp=true "
-                "! queue leaky=2 max-size-buffers=64 "
-                "! matroskamux name=rec_mux "
-                "! filesink name=rec_sink sync=false"
-            )
+            if self._codec_name == "mjpeg":
+                desc = (
+                    "appsrc name=rec_src is-live=true format=time do-timestamp=true "
+                    "! queue leaky=2 max-size-buffers=64 "
+                    "! jpegparse "
+                    "! avimux name=rec_mux "
+                    "! filesink name=rec_sink sync=false"
+                )
+                caps = self._caps_string or "image/jpeg"
+            else:
+                desc = (
+                    "appsrc name=rec_src is-live=true format=time do-timestamp=true "
+                    "! queue leaky=2 max-size-buffers=64 "
+                    "! matroskamux name=rec_mux "
+                    "! filesink name=rec_sink sync=false"
+                )
+                caps = self._caps_string
             recorder = _GStreamerRecorder(
                 Gst=self._Gst,
                 output_path=output,
                 fps=fps,
-                caps_string=self._caps_string,
+                caps_string=caps,
                 pipeline_desc=desc,
             )
         except Exception as exc:  # pragma: no cover - defensive
@@ -517,12 +529,9 @@ class _PyAVRecorder(RecorderBackend):
     def submit(self, payload: bytes, *, fid: int, pts: Optional[int]) -> None:
         packet = self._av.packet.Packet(payload)
         packet.stream = self._stream
-        use_monotonic = self._force_monotonic_pts or pts is None
-        if use_monotonic:
-            timestamp = self._fallback_pts
+        timestamp = pts if (pts is not None and not self._force_monotonic_pts) else self._fallback_pts
+        if self._force_monotonic_pts or pts is None:
             self._fallback_pts += 1
-        else:
-            timestamp = pts
         packet.pts = timestamp
         packet.dts = timestamp
         self._container.mux(packet)
