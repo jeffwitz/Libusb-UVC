@@ -8,6 +8,8 @@ from pathlib import Path
 import pytest
 
 from libusb_uvc import CodecPreference, UVCCamera, UVCError, StreamFormat, FrameInfo
+from libusb_uvc.core import FrameStream, FrameAssemblyResult, _strip_mjpeg_app_markers
+from libusb_uvc.decoders import RecorderBackend
 from libusb_uvc.core import FrameAssemblyResult, FrameStream
 
 from .mocks import MockUsbDevice, StreamingInterfaceAdapter
@@ -86,6 +88,77 @@ def test_read_frame_without_configure_raises(camera: UVCCamera):
     camera._endpoint_address = None  # type: ignore[attr-defined]
     with pytest.raises(UVCError):
         camera.read_frame()
+
+
+def test_strip_mjpeg_app_markers():
+    payload = (
+        b"\xff\xd8"  # SOI
+        b"\xff\xe0\x00\x06ABC"  # APP0 segment
+        b"\xff\xdb\x00\x02\x00"  # DQT (kept)
+        b"\xff\xda\x00\x02\x00"  # SOS
+        b"\xff\xd9"  # EOI
+    )
+    stripped = _strip_mjpeg_app_markers(payload)
+    assert stripped.startswith(b"\xff\xd8")
+    assert b"ABC" not in stripped  # APP segment removed
+    assert stripped.endswith(b"\xff\xd9")
+
+
+def test_frame_stream_records_mjpeg_payload(camera: UVCCamera):
+    fmt = camera.interface.formats[0]
+    frame = fmt.frames[0]
+
+    class DummyRecorder(RecorderBackend):
+        def __init__(self) -> None:
+            self.payloads = []
+
+        def submit(self, payload: bytes, *, fid: int, pts: Optional[int]) -> None:
+            self.payloads.append((payload, fid, pts))
+
+        def close(self) -> None:
+            pass
+
+    stream = FrameStream(
+        camera=camera,
+        stream_format=fmt,
+        frame=frame,
+        frame_rate=15.0,
+        strict_fps=False,
+        queue_size=1,
+        skip_initial=0,
+        transfers=1,
+        packets_per_transfer=1,
+        timeout_ms=1000,
+        duration=None,
+        decoder_preference=None,
+        record_path="dummy.avi",
+    )
+    recorder = DummyRecorder()
+    stream._recorder = recorder  # type: ignore[attr-defined]
+
+    payload = bytearray(
+        b"\xff\xd8"
+        b"\xff\xe1\x00\x06XYZ"
+        b"\xff\xda\x00\x02\x00\x11\x22"
+        b"\xff\xd9"
+    )
+    result = FrameAssemblyResult(
+        payload=payload,
+        fid=5,
+        pts=123,
+        reason="eof",
+        error=False,
+        duration=0.01,
+    )
+    stream._handle_frame_result(result)
+
+    assert recorder.payloads, "Recorder did not receive any payload"
+    recorded, fid, pts = recorder.payloads[0]
+    assert fid == 5
+    assert pts == 123
+    assert recorded.startswith(b"\xff\xd8")
+    assert recorded.endswith(b"\xff\xd9")
+    assert b"XYZ" not in recorded  # APP segment stripped
 
 
 def test_frame_stream_reports_stats(camera: UVCCamera):
