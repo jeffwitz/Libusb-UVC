@@ -3424,6 +3424,7 @@ class FrameStream:
         self._format = stream_format
         self._frame = frame
         self._frame_rate = frame_rate
+        self._negotiated_fps = frame_rate
         self._strict_fps = strict_fps
         self._queue: "queue.Queue[Optional[CapturedFrame]]" = queue.Queue(maxsize=max(1, queue_size))
         self._skip_initial = max(0, skip_initial)
@@ -3503,6 +3504,13 @@ class FrameStream:
             strict_fps=self._strict_fps,
         )
         LOG.debug("FrameStream negotiation: %s", negotiation)
+        self._negotiated_fps = (
+            negotiation.get("calculated_fps")
+            or negotiation.get("frame_rate_hz")
+            or self._frame_rate
+        )
+        if self._negotiated_fps:
+            LOG.info("Stream running at %.2f fps", self._negotiated_fps)
 
         self._reassembler = FrameReassembler(expected_size=self._expected_size)
         self._camera.start_async_stream(
@@ -3669,7 +3677,7 @@ class FrameStream:
                 self._record_path,
                 width=self._frame.width,
                 height=self._frame.height,
-                fps=self._frame_rate,
+                fps=self._negotiated_fps,
             )
         except Exception as exc:  # pragma: no cover - defensive
             LOG.warning("Failed to start recorder: %s", exc)
@@ -3678,7 +3686,7 @@ class FrameStream:
         if recorder is None and self._format.subtype == VS_FORMAT_MJPEG:
             recorder = create_mjpeg_gstreamer_recorder(
                 self._record_path,
-                fps=self._frame_rate,
+                fps=self._negotiated_fps,
             )
             if recorder is not None:
                 fallback_used = True
