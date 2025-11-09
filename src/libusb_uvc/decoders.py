@@ -9,6 +9,7 @@ extended in the future (e.g. Media Foundation, VideoToolbox).
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from fractions import Fraction
 from pathlib import Path
 import contextlib
 from typing import Iterable, List, Optional, Tuple
@@ -24,6 +25,7 @@ except Exception:  # pragma: no cover - optional dependency
 LOG = logging.getLogger(__name__)
 
 _H264_START_CODE = b"\x00\x00\x00\x01"
+_HEVC_IDR_TYPES = {16, 17, 18, 19, 20, 21}
 
 
 class DecoderError(RuntimeError):
@@ -220,6 +222,75 @@ class _H264Normalizer:
         return b"".join(_H264_START_CODE + nal for nal in out)
 
 
+class _H265Normalizer:
+    """Normalise H.265/HEVC payloads to Annex B and reuse cached VPS/SPS/PPS."""
+
+    def __init__(self) -> None:
+        self._vps: List[bytes] = []
+        self._sps: List[bytes] = []
+        self._pps: List[bytes] = []
+        self._have_idr = False
+        self._avc_length_size: Optional[int] = None
+
+    def _detect_layout(self, payload: bytes) -> int:
+        if payload.startswith(_H264_START_CODE) or payload.find(_H264_START_CODE, 1) != -1:
+            return 0
+        for length_size in (4, 3, 2, 1):
+            if len(payload) <= length_size:
+                continue
+            nal_size = int.from_bytes(payload[:length_size], "big", signed=False)
+            if 0 < nal_size <= len(payload) - length_size:
+                return length_size
+        return 0
+
+    def feed(self, payload: bytes) -> Optional[bytes]:
+        if not payload:
+            return None
+
+        if self._avc_length_size is None:
+            self._avc_length_size = self._detect_layout(payload)
+
+        nalus = list(_extract_h264_nalus(payload, avc_length_size=self._avc_length_size))
+        if not nalus:
+            return None
+
+        out: List[bytes] = []
+        produced = False
+
+        for nal in nalus:
+            if not nal:
+                continue
+            nal_type = (nal[0] >> 1) & 0x3F
+            if nal_type == 32:  # VPS
+                self._vps = [nal]
+                continue
+            if nal_type == 33:  # SPS
+                self._sps = [nal]
+                continue
+            if nal_type == 34:  # PPS
+                self._pps = [nal]
+                continue
+            if nal_type in _HEVC_IDR_TYPES:
+                if not (self._vps and self._sps and self._pps):
+                    return None
+                out.extend(self._vps)
+                out.extend(self._sps)
+                out.extend(self._pps)
+                out.append(nal)
+                self._have_idr = True
+                produced = True
+            else:
+                if not self._have_idr:
+                    continue
+                out.append(nal)
+                produced = True
+
+        if not produced:
+            return None
+
+        return b"".join(_H264_START_CODE + nal for nal in out)
+
+
 class _GStreamerDecoder(DecoderBackend):
     """GStreamer-based backend for MJPEG and frame-based codecs."""
 
@@ -265,7 +336,12 @@ class _GStreamerDecoder(DecoderBackend):
         self._timestamp = 0
         self._frame_duration = Gst.SECOND // 30  # default, adjusted dynamically when available
         self._timeout_ns = int(0.5 * Gst.SECOND)
-        self._normalizer = _H264Normalizer() if codec_name == "h264" else None
+        if codec_name == "h264":
+            self._normalizer = _H264Normalizer()
+        elif codec_name == "hevc":
+            self._normalizer = _H265Normalizer()
+        else:
+            self._normalizer = None
 
         state_change = self._pipeline.set_state(Gst.State.PLAYING)
         if state_change == Gst.StateChangeReturn.FAILURE:
@@ -396,21 +472,39 @@ class _GStreamerDecoder(DecoderBackend):
     ) -> Optional[RecorderBackend]:
         try:
             if self._codec_name == "mjpeg":
-                desc = (
-                    "appsrc name=rec_src is-live=true format=time do-timestamp=true "
-                    "! queue leaky=2 max-size-buffers=64 "
-                    "! jpegparse "
-                    "! avimux name=rec_mux "
-                    "! filesink name=rec_sink sync=false"
-                )
+                elements = [
+                    "appsrc name=rec_src is-live=true format=time do-timestamp=true",
+                    "queue leaky=2 max-size-buffers=64",
+                    "jpegparse",
+                    "avimux name=rec_mux",
+                    "filesink name=rec_sink sync=false",
+                ]
+                desc = " ! ".join(elements)
                 caps = self._caps_string or "image/jpeg"
+                normalizer = None
             else:
-                desc = (
-                    "appsrc name=rec_src is-live=true format=time do-timestamp=true "
-                    "! queue leaky=2 max-size-buffers=64 "
-                    "! matroskamux name=rec_mux "
-                    "! filesink name=rec_sink sync=false"
+                parser = None
+                if self._codec_name == "h264":
+                    parser = "h264parse config-interval=-1"
+                    normalizer = _H264Normalizer()
+                elif self._codec_name in {"h265", "hevc"}:
+                    parser = "h265parse config-interval=-1"
+                    normalizer = _H265Normalizer()
+                else:
+                    normalizer = None
+                elements = [
+                    "appsrc name=rec_src is-live=true format=time do-timestamp=true",
+                    "queue leaky=2 max-size-buffers=64",
+                ]
+                if parser:
+                    elements.append(parser)
+                elements.extend(
+                    [
+                        "matroskamux name=rec_mux streamable=true",
+                        "filesink name=rec_sink sync=false",
+                    ]
                 )
+                desc = " ! ".join(elements)
                 caps = self._caps_string
             recorder = _GStreamerRecorder(
                 Gst=self._Gst,
@@ -418,6 +512,7 @@ class _GStreamerDecoder(DecoderBackend):
                 fps=fps,
                 caps_string=caps,
                 pipeline_desc=desc,
+                normalizer=normalizer,
             )
         except Exception as exc:  # pragma: no cover - defensive
             LOG.warning("Failed to initialise GStreamer recorder: %s", exc)
@@ -441,7 +536,12 @@ class _PyAVDecoder(DecoderBackend):
             self._codec = av.CodecContext.create(codec_name, "r")
         except av.AVError as exc:  # pragma: no cover - depends on installation
             raise DecoderUnavailable(f"PyAV cannot create codec '{codec_name}'") from exc
-        self._normalizer = _H264Normalizer() if codec_name == "h264" else None
+        if codec_name == "h264":
+            self._normalizer = _H264Normalizer()
+        elif codec_name == "hevc":
+            self._normalizer = _H265Normalizer()
+        else:
+            self._normalizer = None
 
     def decode_packet(self, packet: bytes) -> List[object]:  # pragma: no cover - backend optional
         if self._normalizer is not None:
@@ -487,6 +587,12 @@ class _PyAVDecoder(DecoderBackend):
 
         codec_name = _normalise_codec_name(self._format_name)
         container = "avi" if codec_name in {"mjpeg", "jpeg"} else "matroska"
+        if codec_name == "h264":
+            normalizer = _H264Normalizer()
+        elif codec_name == "hevc":
+            normalizer = _H265Normalizer()
+        else:
+            normalizer = None
         return _PyAVRecorder(
             av_module=av,
             codec_name=codec_name,
@@ -495,6 +601,7 @@ class _PyAVDecoder(DecoderBackend):
             height=height,
             fps=fps,
             container=container,
+            normalizer=normalizer,
         )
 
 
@@ -511,6 +618,7 @@ class _PyAVRecorder(RecorderBackend):
         height: int,
         fps: Optional[float],
         container: str,
+        normalizer: Optional[object],
     ) -> None:
         self._av = av_module
         self._container = av_module.open(str(output_path), "w", format=container)
@@ -518,6 +626,14 @@ class _PyAVRecorder(RecorderBackend):
         if fps and fps > 0:
             rate = max(1, int(round(fps)))
         stream = self._container.add_stream(codec_name, rate=rate)
+        if rate:
+            time_base = Fraction(1, rate)
+            try:
+                stream.time_base = time_base
+                stream.codec_context.time_base = time_base
+            except Exception:  # pragma: no cover - best effort
+                LOG.debug("Unable to override PyAV time_base", exc_info=True)
+        self._time_base = stream.time_base
         stream.width = width
         stream.height = height
         if codec_name == "mjpeg":
@@ -525,15 +641,22 @@ class _PyAVRecorder(RecorderBackend):
         self._force_monotonic_pts = codec_name == "mjpeg"
         self._stream = stream
         self._fallback_pts = 0
+        self._normalizer = normalizer
 
     def submit(self, payload: bytes, *, fid: int, pts: Optional[int]) -> None:
+        if self._normalizer is not None:
+            payload = self._normalizer.feed(payload)
+            if payload is None:
+                return
         packet = self._av.packet.Packet(payload)
         packet.stream = self._stream
-        timestamp = pts if (pts is not None and not self._force_monotonic_pts) else self._fallback_pts
-        if self._force_monotonic_pts or pts is None:
+        use_fallback = self._force_monotonic_pts or pts is None
+        timestamp = self._fallback_pts if use_fallback else pts
+        if use_fallback:
             self._fallback_pts += 1
         packet.pts = timestamp
         packet.dts = timestamp
+        packet.time_base = self._time_base
         self._container.mux(packet)
 
     def close(self) -> None:
@@ -554,6 +677,7 @@ class _GStreamerRecorder(RecorderBackend):
         fps: Optional[float],
         caps_string: Optional[str],
         pipeline_desc: str,
+        normalizer: Optional[object] = None,
     ) -> None:
         self._Gst = Gst
         self._pipeline = Gst.parse_launch(pipeline_desc)
@@ -569,8 +693,13 @@ class _GStreamerRecorder(RecorderBackend):
             caps = Gst.Caps.from_string(caps_string)
             self._appsrc.set_property("caps", caps)
         self._pipeline.set_state(Gst.State.PLAYING)
+        self._normalizer = normalizer
 
     def submit(self, payload: bytes, *, fid: int, pts: Optional[int]) -> None:
+        if self._normalizer is not None:
+            payload = self._normalizer.feed(payload)
+            if payload is None:
+                return
         buf = self._Gst.Buffer.new_allocate(None, len(payload), None)
         buf.fill(0, payload)
         timestamp = pts if pts is not None else self._timestamp

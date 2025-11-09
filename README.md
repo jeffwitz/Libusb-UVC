@@ -174,6 +174,48 @@ For a scripted example that also toggles the LED after a delay, see `examples/uv
 
 To play with manual exposure, try `examples/exposure_sweep.py`, which disables auto exposure and sweeps `Exposure Time, Absolute` from its minimum to maximum over 300 frames while overlaying the current value on the preview window.
 
+### Device selection shortcuts
+
+Every example now accepts a copy/paste friendly `--device-id` flag.  Both
+decimal and hexadecimal strings work, so you can feed the exact string that
+`lsusb` prints (`32e4:9415`, `0x32e4:0x9415`, `13028:37909`, …) without
+rewriting it.  Add `--device-sn` when you have two identical cameras and need a
+stable target, or `--device-path BUS:PORT[.PORT…]` to bind to a specific USB
+topology (handy when serial numbers are absent).
+
+`examples/uvc_inspect.py` still honours explicit filters, but if you run it
+without arguments it now lists every detected UVC device along with the VID:PID,
+USB bus, port path, and serial number so you can copy the identifiers straight
+into the other scripts.
+
+### Record compressed payloads without re-encoding
+
+`uvc_capture_video.py` gained `--record FILE` to store the incoming payloads as
+is.  PyAV is preferred for muxing (MJPEG, H.264, and H.265), and the helper
+falls back to a tiny GStreamer pipeline when PyAV is unavailable for MJPEG.  The
+toolkit forces `.avi` for MJPEG (many webcams only produce spec-compliant MJPEG
+AVI files) and `.mkv` for H.26x streams; APP segments are stripped before
+writing so that players such as VLC/mpv never choke on firmware-specific JPEG
+markers.  When the USB firmware does not report presentation timestamps the
+recorder synthesises monotonic timestamps based on the negotiated frame rate, so
+the resulting video plays at the expected speed.
+
+Examples:
+
+```bash
+# MJPEG webcam, no decoder/preview needed, records lossless AVI
+python3 examples/uvc_capture_video.py \
+    --device-id 0408:5473 --interface 1 \
+    --codec mjpeg --decoder pyav \
+    --record ./hp_webcam.avi --duration 10
+
+# HDMI-to-UVC grabber capturing H.265 straight to Matroska
+python3 examples/uvc_capture_video.py \
+    --device-id 32e4:9415 --device-sn 406c101e3c214ef3 \
+    --interface 1 --codec h265 --decoder pyav \
+    --width 3840 --height 2160 --record ./capture.mkv --duration 15
+```
+
 ### Generate a quirks skeleton
 
 ```bash
@@ -281,7 +323,7 @@ The stream iterator handles all PROBE/COMMIT steps, asynchronous transfers, and 
 
 ## Roadmap / To Do
 
-- **Compressed payload support (H.264/H.265/AV1/VP8):** the toolkit still focuses on uncompressed and MJPEG streams; adding the modern codecs means parsing their payload headers, negotiating format-specific controls, and integrating decoders.
+- **Next-generation codec coverage (AV1/VP8):** H.264/H.265 payloads (plus MJPEG) already include negotiated decoding/recording helpers via PyAV and GStreamer, but AV1/VP8 devices will need their own parser/decoder plumbing plus new muxer presets.
 - **Still-image pipeline hardening:** Method 1 and Method 2 negotiation work, but we still need per-device quirks for multi-sensor rigs, vendor compression indices, and bulk-only endpoints so captures succeed without manual tweaking.
 - **Control coverage & vendor quirks:** even when a control is advertised (for example an IR torch selector), firmwares often expect vendor-specific messages. Mapping them reliably demands per-device investigation or reverse engineering before they can become first-class features in the toolkit.
 

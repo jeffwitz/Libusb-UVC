@@ -3563,6 +3563,7 @@ class FrameStream:
         self._camera.stop_async_stream()
         self._camera.stop_streaming()
         self._release_decoder()
+        self._shutdown_recorder()
 
         if self._poll_thread is not None:
             self._poll_thread.join(timeout=0.5)
@@ -3594,7 +3595,6 @@ class FrameStream:
                 LOG.debug("FrameStream queue full; dropping frame %s", frame.sequence)
 
     def _release_decoder(self) -> None:
-        self._shutdown_recorder()
         if self._decoder is None:
             return
         try:
@@ -3697,11 +3697,9 @@ class FrameStream:
                     "Recording requires either the PyAV or GStreamer backends. "
                     "Install at least one (pip install av / python3-gi gstreamer1.0-plugins-good)."
                 )
-            LOG.warning(
-                "Recording backend unavailable for format %s",
-                self._format.description,
+            raise RuntimeError(
+                "Recording compressed streams requires the PyAV backend (pip install av)."
             )
-            return
         if self._format.subtype == VS_FORMAT_MJPEG:
             if fallback_used:
                 label = "GStreamer fallback"
