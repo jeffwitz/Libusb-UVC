@@ -56,10 +56,10 @@ camera's Vendor ID (VID) and Product ID (PID). After copying the file to
 First Stream
 ------------
 
-The quickest way to check your setup is via the OpenCV preview helper::
+The quickest way to check your setup is via the OpenCV preview / recorder helper::
 
    python3 examples/uvc_capture_video.py \
-       --vid 0x0408 --pid 0x5473 \
+       --device-id 0408:5473 \
        --width 1920 --height 1080 \
        --fps 30 --codec mjpeg \
        --duration 10
@@ -67,6 +67,23 @@ The quickest way to check your setup is via the OpenCV preview helper::
 The script claims both the control and streaming interfaces, negotiates
 PROBE/COMMIT, and resets the device on exit so ``/dev/video*`` remains usable.
 Press ``q`` or ``Esc`` to close the window early.
+
+Add ``--record ./capture.avi`` (MJPEG) or ``--record ./capture.mkv`` (frame-based formats) to store the
+incoming payloads without re-encoding. Libusb-UVC injects missing SPS/PPS/VPS headers automatically so
+H.264/H.265 recordings play back at the negotiated frame rate.
+
+Targeting a Specific Camera
+---------------------------
+
+When multiple cameras expose the same VID/PID pair, use the copy/paste friendly selectors:
+
+* ``--device-id VID:PID`` — accepts decimal or hexadecimal strings (``32e4:9415`` or ``0x32e4:0x9415``).
+* ``--device-sn`` — filter by the exact USB serial number.
+* ``--device-path`` — pin the physical topology as ``BUS:PORT[.PORT…]`` (e.g. ``3:1.2``).
+
+These flags are honoured by every example script. Under the hood they resolve to a deterministic
+``device_index`` so once you've identified each camera (via ``uvc_inspect.py`` or ``lsusb``) you can launch
+simultaneous captures without guessing indices.
 
 Multiple Sensors on One Device
 ------------------------------
@@ -118,10 +135,11 @@ decoder preference explicitly::
        ...
 
 If you pick a specific backend, MJPEG payloads are routed through it as well so
-you can validate the plumbing on legacy cameras.  The embedded GStreamer
-pipeline already covers MJPEG, H.264, and H.265 (``jpegdec``/``avdec_h26*``),
-while PyAV provides software MJPEG + H.264/HEVC decoding.  Leave the preference
-at ``auto`` to keep the historical MJPEG/uncompressed fast paths.
+you can validate the plumbing on legacy cameras or force a particular recorder.
+The embedded GStreamer pipeline already covers MJPEG, H.264, and H.265
+(``jpegdec``/``avdec_h26*``), while PyAV provides software MJPEG + H.264/HEVC
+decoding and Matroska/AVI muxing. Leave the preference at ``auto`` to keep the
+historical MJPEG/uncompressed fast paths.
 
 Next Steps
 ----------
