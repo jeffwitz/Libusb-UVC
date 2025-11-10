@@ -27,3 +27,17 @@ LOG = globals().get("LOG")
 
 # Provide a direct reference to the implementation module for advanced users.
 core = _core
+
+try:  # re-export optional stereo helpers when available
+    from .stereo import StereoCameraConfig, StereoCapture, StereoFrame, StereoStats
+
+    __all__.extend(
+        [
+            "StereoCameraConfig",
+            "StereoCapture",
+            "StereoFrame",
+            "StereoStats",
+        ]
+    )
+except Exception:  # pragma: no cover - optional feature
+    pass
