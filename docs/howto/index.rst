@@ -19,7 +19,13 @@ Run Unit Tests
 
 2. Execute the emulator-backed unit suite::
 
-      python3 -m pytest tests/test_controls.py
+      python3 -m pytest tests/test_controls.py tests/test_streaming.py
+
+``tests/test_integration.py`` contains hardware-dependent cases tagged with
+``@pytest.mark.integration``. They are skipped by default. When you have a
+compatible UVC device connected, run them explicitly::
+
+      python3 -m pytest -m integration tests/test_integration.py
 
 USB Gadget Integration Tests
 ----------------------------

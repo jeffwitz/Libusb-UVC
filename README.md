@@ -361,6 +361,13 @@ Run the unit suite with::
 
    python -m pytest tests/test_controls.py tests/test_streaming.py
 
+Two additional scenarios in ``tests/test_integration.py`` are marked
+``@pytest.mark.integration`` because they require a real UVC device (PROBE/COMMIT
+and frame streaming). They are skipped by default; run them explicitly only when
+you have compatible hardware attached::
+
+   python -m pytest -m integration tests/test_integration.py
+
 ### Integration tests (USB gadget)
 
 For end-to-end validation libusb-uvc can talk to a fully virtual camera
