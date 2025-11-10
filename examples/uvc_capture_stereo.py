@@ -12,11 +12,19 @@ from typing import Optional
 import cv2
 import numpy as np
 
-from uvc_cli import ensure_repo_import
+from uvc_cli import ensure_repo_import, parse_device_id
 
 ensure_repo_import()
 
-from libusb_uvc import CodecPreference, UVCCamera, UVCError, describe_device  # type: ignore  # pylint: disable=wrong-import-position
+import usb.util
+
+from libusb_uvc import (  # type: ignore  # pylint: disable=wrong-import-position
+    CodecPreference,
+    UVCCamera,
+    UVCError,
+    describe_device,
+    find_uvc_devices,
+)
 
 LOG = logging.getLogger("stereo_preview")
 
@@ -60,10 +68,14 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Timestamp-synchronised stereo preview")
     parser.add_argument("--left-index", type=int, default=0, help="Device index of the left camera")
     parser.add_argument("--right-index", type=int, default=1, help="Device index of the right camera")
+    parser.add_argument("--device-id", help="VID:PID shared by both cameras (hex or decimal)")
+    parser.add_argument("--left-device-sn", help="Serial number of the left camera")
+    parser.add_argument("--right-device-sn", help="Serial number of the right camera")
+    parser.add_argument("--interface", type=int, default=1, help="UVC interface number to claim")
     parser.add_argument("--width", type=int, default=640, help="Frame width")
     parser.add_argument("--height", type=int, default=480, help="Frame height")
     parser.add_argument("--fps", type=float, default=15.0, help="Expected frame rate")
-    codec_choices = [c.name.lower() for c in CodecPreference]
+    codec_choices = ["auto", "yuyv", "mjpeg", "frame_based", "h264", "h265"]
     parser.add_argument(
         "--codec",
         default="mjpeg",
@@ -71,15 +83,24 @@ def main() -> int:
         help="Codec to request on both cameras",
     )
     parser.add_argument("--max-ts-diff", type=float, default=0.033, help="Max timestamp delta (s) for pairing")
+    parser.add_argument("--print-deltas", action="store_true", help="Print timestamp deltas for each pair")
+    parser.add_argument("--display", action="store_true", help="Show OpenCV window with stereo preview")
     parser.add_argument("--log-level", default="INFO")
     args = parser.parse_args()
 
     logging.basicConfig(level=args.log_level.upper())
-    args.codec = CodecPreference[args.codec.upper()]
+    args.codec = getattr(CodecPreference, args.codec.upper())
 
+    left_cam = None
+    right_cam = None
     try:
-        left_cam = UVCCamera.open(device_index=args.left_index)
-        right_cam = UVCCamera.open(device_index=args.right_index)
+        if args.device_id:
+            vid, pid = parse_device_id(args.device_id)
+            left_cam = _open_camera_filtered(vid, pid, args.left_device_sn, args.interface, label="left")
+            right_cam = _open_camera_filtered(vid, pid, args.right_device_sn, args.interface, label="right")
+        else:
+            left_cam = UVCCamera.open(device_index=args.left_index)
+            right_cam = UVCCamera.open(device_index=args.right_index)
     except UVCError as exc:
         LOG.error("Unable to open cameras: %s", exc)
         return 1
@@ -106,10 +127,14 @@ def main() -> int:
     left_thread.start()
     right_thread.start()
 
-    cv2.namedWindow("stereo", cv2.WINDOW_NORMAL)
+    if args.display:
+        cv2.namedWindow("stereo", cv2.WINDOW_NORMAL)
 
-    left_frame: Optional[object] = None
-    right_frame: Optional[object] = None
+    left_frame = None
+    right_frame = None
+    frame_period_ms = (1000.0 / args.fps) if args.fps > 0 else None
+    left_drops = 0
+    right_drops = 0
 
     try:
         while not stop_event.is_set():
@@ -132,38 +157,74 @@ def main() -> int:
             delta = left_frame.timestamp - right_frame.timestamp
 
             if abs(delta) <= args.max_ts_diff:
-                try:
-                    left_bgr = left_frame.to_bgr()
-                    right_bgr = right_frame.to_bgr()
-                except RuntimeError as exc:  # numpy/cv2 errors
-                    LOG.warning("Conversion failed: %s", exc)
-                    left_frame = None
-                    right_frame = None
-                    continue
-
-                stereo = np.hstack((left_bgr, right_bgr))
-                cv2.imshow("stereo", stereo)
+                if args.print_deltas:
+                    hw_offset = None
+                    if frame_period_ms is not None:
+                        hw_offset = (left_drops - right_drops) * frame_period_ms
+                    msg = f"Δ={delta*1000:.3f} ms (ts L={left_frame.timestamp:.6f}s R={right_frame.timestamp:.6f}s)"
+                    if hw_offset is not None:
+                        msg += f" | offset≈{hw_offset:.3f} ms"
+                    print(msg)
+                if args.display:
+                    try:
+                        left_bgr = left_frame.to_bgr()
+                        right_bgr = right_frame.to_bgr()
+                    except RuntimeError as exc:  # numpy/cv2 errors
+                        LOG.warning("Conversion failed: %s", exc)
+                        left_frame = None
+                        right_frame = None
+                        continue
+                    stereo = np.hstack((left_bgr, right_bgr))
+                    cv2.imshow("stereo", stereo)
                 left_frame = None
                 right_frame = None
             elif delta > 0:
                 left_frame = None
+                left_drops += 1
             else:
                 right_frame = None
+                right_drops += 1
 
-            key = cv2.waitKey(1) & 0xFF
-            if key in (ord("q"), 27):
-                break
+            if args.display:
+                key = cv2.waitKey(1) & 0xFF
+                if key in (ord("q"), 27):
+                    break
     except KeyboardInterrupt:
         LOG.info("Interrupted by user")
     finally:
         stop_event.set()
         left_thread.join(timeout=1)
         right_thread.join(timeout=1)
-        left_cam.close()
-        right_cam.close()
-        cv2.destroyAllWindows()
+        if left_cam:
+            left_cam.close()
+        if right_cam:
+            right_cam.close()
+        if args.display:
+            cv2.destroyAllWindows()
 
     return 0
+
+
+def _open_camera_filtered(vid: int, pid: int, serial: Optional[str], interface: int, label: str) -> UVCCamera:
+    if not serial:
+        raise UVCError(f"--{label}-device-sn is required when --device-id is provided")
+    devices = find_uvc_devices(vid, pid)
+    if not devices:
+        raise UVCError(f"No cameras found for VID:PID {vid:04x}:{pid:04x}")
+    target_index = None
+    for idx, dev in enumerate(devices):
+        device_serial = None
+        try:
+            if dev.iSerialNumber:
+                device_serial = usb.util.get_string(dev, dev.iSerialNumber)
+        except Exception:
+            device_serial = None
+        if device_serial == serial:
+            target_index = idx
+            break
+    if target_index is None:
+        raise UVCError(f"No camera with serial {serial} for VID:PID {vid:04x}:{pid:04x}")
+    return UVCCamera.open(vid=vid, pid=pid, device_index=target_index, interface=interface)
 
 
 if __name__ == "__main__":
