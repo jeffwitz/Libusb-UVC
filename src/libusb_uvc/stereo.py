@@ -89,9 +89,12 @@ class _PtsUnwrapper:
 
     def convert(self, frame: CapturedFrame, host_ts: float, prefer_hw: bool) -> float:
         if prefer_hw and frame.pts is not None:
-            raw = frame.pts & 0xFFFFFFFF
-            if self._last_raw is not None and raw < self._last_raw:
-                self._wraps += 1
+            raw = int(frame.pts) & 0xFFFFFFFF
+            if self._last_raw is not None:
+                delta = raw - self._last_raw
+                if delta < 0 and abs(delta) > (_PTS_WRAP // 2):
+                    # Large negative jump -> wraparound.
+                    self._wraps += 1
             self._last_raw = raw
             absolute = raw + self._wraps * _PTS_WRAP
             return absolute / self._scale
@@ -300,7 +303,7 @@ class StereoCapture:
         left_unwrapper = _PtsUnwrapper()
         right_unwrapper = _PtsUnwrapper()
         left_start = time.time()
-        right_start = left_start
+        right_start = time.time()
         last_right_seen: Optional[float] = None
         last_left_seen: Optional[float] = None
 
@@ -365,17 +368,24 @@ class StereoCapture:
         left_buffer: Deque[_StampedFrame],
         right_buffer: Deque[_StampedFrame],
     ) -> Optional[StereoFrame]:
-        if not left_buffer or not right_buffer:
-            return None
+        while left_buffer and right_buffer:
+            left = left_buffer[0]
+            right = right_buffer[0]
+            raw_delta = left.timestamp - right.timestamp
+            if abs(raw_delta) <= self._sync_window:
+                left_buffer.popleft()
+                right_buffer.popleft()
+                return self._assemble_pair(left, right, raw_delta)
 
-        left = left_buffer.popleft()
-        right = right_buffer.popleft()
-        raw_delta = left.timestamp - right.timestamp
-        if raw_delta > 0:
-            self._left_drops += 1
-        elif raw_delta < 0:
-            self._right_drops += 1
-        return self._assemble_pair(left, right, raw_delta)
+            if raw_delta > 0:
+                # Right frame is earlier; drop it so left can catch up.
+                right_buffer.popleft()
+                self._register_drop(drop_left=False)
+            else:
+                left_buffer.popleft()
+                self._register_drop(drop_left=True)
+
+        return None
 
     def _assemble_pair(self, left: _StampedFrame, right: _StampedFrame, raw_delta: float) -> StereoFrame:
         delta_ms = raw_delta * 1000.0
@@ -411,7 +421,21 @@ class StereoCapture:
         *,
         drop_left: bool,
     ) -> None:
-        return
+        if reference_ts is None or not buffer:
+            return
+
+        threshold = reference_ts - self._drop_window
+        while buffer and buffer[0].timestamp < threshold:
+            buffer.popleft()
+            self._register_drop(drop_left=drop_left)
+
+    def _register_drop(self, drop_left: bool) -> None:
+        if drop_left:
+            self._left_drops += 1
+            self._stats.left_dropped += 1
+        else:
+            self._right_drops += 1
+            self._stats.right_dropped += 1
 
 
 __all__ = [
