@@ -188,6 +188,15 @@ without arguments it now lists every detected UVC device along with the VID:PID,
 USB bus, port path, and serial number so you can copy the identifiers straight
 into the other scripts.
 
+### Stereo capture
+
+For tightly synchronised dual-camera capture use `examples/uvc_capture_stereo.py`.
+It launches two producer threads pinned to optional CPU cores, aligns their start
+via a barrier, and pairs frames using both host timestamps and hardware PTS when
+available. Refer to `docs/stereo_sync.md` for a full walkthrough of the queueing,
+calibration, and tuning strategy plus a sample command that delivered optimal
+results on dual HDMI grabbers.
+
 ### Record compressed payloads without re-encoding
 
 `uvc_capture_video.py` gained `--record FILE` to store the incoming payloads as
