@@ -43,7 +43,7 @@ log output.
 
 **Resolution:** Isochronous transfers are constrained by USB bandwidth. Move
 the camera to a direct root-port, lower the frame size or frame rate, or adjust
-    the ``queue_size`` passed to :meth:`libusb_uvc.UVCCamera.stream`.
+the ``queue_size`` passed to :meth:`libusb_uvc.UVCCamera.stream`.
 
 Frame-based H.264/H.265 Quirks
 ------------------------------
