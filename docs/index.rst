@@ -21,6 +21,7 @@ confidence.
    getting_started
    controls_and_streaming
    examples
+   stereo_sync
    troubleshooting
 
 .. toctree::

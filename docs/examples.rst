@@ -121,6 +121,16 @@ Inspect Extension Unit (XU) selectors and write a JSON skeleton that can be
 added to ``src/libusb_uvc/quirks``. Use ``--single`` together with ``--output``
 to save a ready-to-edit file for the target GUID.
 
+``uvc_capture_stereo.py``
+-------------------------
+
+Synchronise two identical UVC cameras by running dual producer threads pinned to
+dedicated CPU cores.  The helper uses a barrier to align stream start, drains
+per-camera queues (`--pairing-mode latest`) or processes them FIFO, and supports
+auto-calibration of the steady-state delta as well as manual overrides.  See
+:doc:`stereo_sync` for the full strategy plus a recommended command line that
+yielded sub-5 ms pairing error on dual HDMI grabbers.
+
 Integrating Scripts
 -------------------
 
