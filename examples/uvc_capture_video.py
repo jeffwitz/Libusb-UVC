@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import logging
 import time
+from pathlib import Path
 
 import cv2
 
@@ -92,12 +93,17 @@ def main() -> int:
     parser.add_argument("--strict-fps", action="store_true", help="Require exact FPS match during PROBE")
     parser.add_argument("--duration", type=float, help="Automatically stop preview after the given seconds")
     parser.add_argument("--list", action="store_true", help="List formats for the interface and exit")
+    parser.add_argument("--record", type=Path, help="Write compressed payloads to this file (requires PyAV decoder)")
     parser.add_argument("--log-level", default="INFO")
     args = parser.parse_args()
     apply_device_filters(args)
     resolve_device_index(args)
 
     configure_logging(args.log_level, name="capture_video")
+
+    if args.record and (args.decoder is None or args.decoder == DecoderPreference.AUTO):
+        LOG.info("Recording requested; defaulting decoder backend to PyAV")
+        args.decoder = DecoderPreference.PYAV
 
     try:
         with UVCCamera.open(
@@ -125,6 +131,7 @@ def main() -> int:
                 skip_initial=max(0, args.skip_frames),
                 timeout_ms=max(args.timeout, 1000),
                 duration=args.duration,
+                record_to=args.record,
             )
 
             with stream as frames:

@@ -43,7 +43,7 @@ log output.
 
 **Resolution:** Isochronous transfers are constrained by USB bandwidth. Move
 the camera to a direct root-port, lower the frame size or frame rate, or adjust
-    the ``queue_size`` passed to :meth:`libusb_uvc.UVCCamera.stream`.
+the ``queue_size`` passed to :meth:`libusb_uvc.UVCCamera.stream`.
 
 Frame-based H.264/H.265 Quirks
 ------------------------------
@@ -73,6 +73,31 @@ cheaper hardware) the stream remains undecodable.  You can:
   controls containing SPS/PPS blobs.
 * File a bug with the camera vendor; the host cannot reconstruct missing SPS/PPS
   without reverse-engineering the firmware.
+
+Recording Plays Too Fast/Slow
+-----------------------------
+
+**Symptom:** Saved ``.mkv``/``.avi`` files appear to run at 2x speed or crawl when opened in VLC/mpv.
+
+**Resolution:** The recorder uses presentation timestamps from the camera
+payload headers. Some firmwares omit PTS entirely, so Libusb-UVC synthesises
+monotonic timestamps from the negotiated FPS. If playback is still off, verify
+the stream actually negotiated the expected FPS (look for ``Stream running at
+XX.XX fps`` in the logs) and lower the requested frame rate to one of the
+advertised intervals listed by ``uvc_inspect.py``.
+
+Recording Files Are Empty
+-------------------------
+
+**Symptom:** ``.mkv``/``.avi`` outputs are zero bytes or players report ``End of file``.
+
+**Resolution:** Some cameras take several seconds to emit the first IDR / key
+frame. Let the recorder run for longer (10s+ on the HDMI grabber reference
+device) so the pipeline can flush its header. Ensure you requested a decoder
+backend (PyAV or GStreamer) and that the relevant dependencies are installed.
+MJPEG recordings require either PyAV or the GStreamer fallback; frame-based
+codecs require PyAV or GStreamer with the matching ``h264parse``/``h265parse``
+plugins.
 
 Controls Missing or Unnamed
 ---------------------------

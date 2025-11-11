@@ -1698,7 +1698,13 @@ def perform_still_probe_commit(
 
 
 
-from .decoders import DEFAULT_BACKEND_ORDER, create_decoder_backend, DecoderUnavailable
+from .decoders import (
+    DEFAULT_BACKEND_ORDER,
+    RecorderBackend,
+    create_decoder_backend,
+    DecoderUnavailable,
+    create_mjpeg_gstreamer_recorder,
+)
 from .uvc_async import IsoConfig, UVCPacketStream, InterruptConfig, InterruptListener
 class UVCCamera:
     """Minimal helper to configure a streaming interface and fetch frames."""
@@ -2472,6 +2478,7 @@ class UVCCamera:
         packets_per_transfer: int = 64,
         timeout_ms: int = 2000,
         duration: Optional[float] = None,
+        record_to: Optional[Union[str, pathlib.Path]] = None,
     ) -> "FrameStream":
         """Return a managed frame iterator for continuous streaming.
 
@@ -2481,6 +2488,8 @@ class UVCCamera:
             Optional decoder backend preference for frame-based codecs (for example
             H.264/H.265).  Use :data:`DecoderPreference.NONE` to keep raw payloads
             and defer decoding.  MJPEG and uncompressed formats ignore this setting.
+        record_to:
+            Optional file path for writing the compressed payloads (requires a decoder backend that supports recording).
         """
 
         stream_format, frame = self.select_stream(
@@ -2504,6 +2513,7 @@ class UVCCamera:
             timeout_ms=timeout_ms,
             duration=duration,
             decoder_preference=decoder,
+            record_path=record_to,
         )
 
     def configure_stream(
@@ -3350,6 +3360,17 @@ def _parse_probe_payload(payload: bytes) -> dict:
         result["frame_rate_hz"] = _interval_to_hz(interval)
     return result
 
+def _normalise_record_path(path: pathlib.Path, stream_format: StreamFormat) -> pathlib.Path:
+    if stream_format.subtype == VS_FORMAT_MJPEG:
+        if path.suffix.lower() != ".avi":
+            LOG.info("MJPEG recording forced to AVI container (.avi)")
+            return path.with_suffix(".avi")
+        return path
+    if path.suffix.lower() != ".mkv":
+        LOG.info("Recording output forced to Matroska container (.mkv)")
+        return path.with_suffix(".mkv")
+    return path
+
 def _decode_payload_once(
     format_descriptor: Optional[StreamFormat],
     payload: Union[bytes, bytearray],
@@ -3397,11 +3418,13 @@ class FrameStream:
         timeout_ms: int,
         duration: Optional[float],
         decoder_preference: Optional[Union[str, DecoderPreference, Iterable[str]]] = None,
+        record_path: Optional[Union[str, pathlib.Path]] = None,
     ) -> None:
         self._camera = camera
         self._format = stream_format
         self._frame = frame
         self._frame_rate = frame_rate
+        self._negotiated_fps = frame_rate
         self._strict_fps = strict_fps
         self._queue: "queue.Queue[Optional[CapturedFrame]]" = queue.Queue(maxsize=max(1, queue_size))
         self._skip_initial = max(0, skip_initial)
@@ -3428,6 +3451,12 @@ class FrameStream:
         self._start_time = 0.0
         self._sequence = 0
         self._stats = StreamStats()
+        self._record_path = (
+            _normalise_record_path(pathlib.Path(record_path).expanduser(), stream_format)
+            if record_path
+            else None
+        )
+        self._recorder: Optional[RecorderBackend] = None
 
         is_mjpeg = stream_format.subtype == VS_FORMAT_MJPEG or "MJPG" in stream_format.description.upper()
         is_frame_based = stream_format.subtype == VS_FORMAT_FRAME_BASED
@@ -3439,6 +3468,11 @@ class FrameStream:
             else frame.max_frame_size or (frame.width * frame.height * 2)
         )
         self._reassembler = FrameReassembler(expected_size=self._expected_size)
+        if self._record_path and not self._decoder_applicable:
+            LOG.warning(
+                "Recording requested but no decoder backend will be activated for %s; skipping recorder setup",
+                stream_format.description,
+            )
 
         self._decoder = None
         self._decoder_failed = False
@@ -3470,6 +3504,13 @@ class FrameStream:
             strict_fps=self._strict_fps,
         )
         LOG.debug("FrameStream negotiation: %s", negotiation)
+        self._negotiated_fps = (
+            negotiation.get("calculated_fps")
+            or negotiation.get("frame_rate_hz")
+            or self._frame_rate
+        )
+        if self._negotiated_fps:
+            LOG.info("Stream running at %.2f fps", self._negotiated_fps)
 
         self._reassembler = FrameReassembler(expected_size=self._expected_size)
         self._camera.start_async_stream(
@@ -3522,6 +3563,7 @@ class FrameStream:
         self._camera.stop_async_stream()
         self._camera.stop_streaming()
         self._release_decoder()
+        self._shutdown_recorder()
 
         if self._poll_thread is not None:
             self._poll_thread.join(timeout=0.5)
@@ -3623,6 +3665,58 @@ class FrameStream:
             LOG.info("Decoder backend %s active for %s", label, self._format.description)
         else:
             LOG.info("Decoder backend switched to %s for %s", label, self._format.description)
+        self._install_recorder(backend)
+
+    def _install_recorder(self, backend) -> None:
+        if self._record_path is None or self._recorder is not None:
+            return
+        recorder = None
+        fallback_used = False
+        try:
+            recorder = backend.create_recorder(
+                self._record_path,
+                width=self._frame.width,
+                height=self._frame.height,
+                fps=self._negotiated_fps,
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            LOG.warning("Failed to start recorder: %s", exc)
+            recorder = None
+
+        if recorder is None and self._format.subtype == VS_FORMAT_MJPEG:
+            recorder = create_mjpeg_gstreamer_recorder(
+                self._record_path,
+                fps=self._negotiated_fps,
+            )
+            if recorder is not None:
+                fallback_used = True
+
+        if recorder is None:
+            if self._format.subtype == VS_FORMAT_MJPEG:
+                raise RuntimeError(
+                    "Recording requires either the PyAV or GStreamer backends. "
+                    "Install at least one (pip install av / python3-gi gstreamer1.0-plugins-good)."
+                )
+            raise RuntimeError(
+                "Recording compressed streams requires the PyAV backend (pip install av)."
+            )
+        if self._format.subtype == VS_FORMAT_MJPEG:
+            if fallback_used:
+                label = "GStreamer fallback"
+            else:
+                label = self._decoder_backend_name or type(backend).__name__
+            LOG.info("Recording MJPEG payloads via %s", label)
+        self._recorder = recorder
+
+    def _shutdown_recorder(self) -> None:
+        if self._recorder is None:
+            return
+        try:
+            self._recorder.close()
+        except Exception:  # pragma: no cover - best-effort
+            LOG.debug("Recorder close() failed", exc_info=True)
+        finally:
+            self._recorder = None
 
     def _decode_payload(self, payload: Union[bytes, bytearray]) -> Optional[object]:
         if not self._decoder_applicable or self._decoder_order is None:
@@ -3663,6 +3757,16 @@ class FrameStream:
             )
             return
 
+        payload_data = bytes(result.payload)
+        payload_for_record = payload_data
+        if self._recorder is not None:
+            if self._format.subtype == VS_FORMAT_MJPEG:
+                payload_for_record = _strip_mjpeg_app_markers(payload_data)
+            try:
+                self._recorder.submit(payload_for_record, fid=result.fid or 0, pts=result.pts)
+            except Exception:  # pragma: no cover - best effort
+                LOG.debug("Recorder submit failed", exc_info=True)
+
         if self._skip_initial > 0:
             self._skip_initial -= 1
             self._stats.frames_dropped += 1
@@ -3689,9 +3793,9 @@ class FrameStream:
             self._stats.measured_frames = samples + 1
 
         self._sequence += 1
-        decoded = self._decode_payload(result.payload)
+        decoded = self._decode_payload(payload_data)
         frame = CapturedFrame(
-            payload=result.payload,
+            payload=payload_data,
             format=self._format,
             frame=self._frame,
             fid=result.fid if result.fid is not None else 0,
@@ -3804,6 +3908,44 @@ def _trim_mjpeg_payload(payload: bytes) -> bytes:
     LOG.debug("Trimming MJPEG payload from %s to %s bytes (extraneous %s bytes)", len(payload), len(trimmed), len(payload) - len(trimmed))
     return trimmed
 
+
+def _strip_mjpeg_app_markers(payload: bytes) -> bytes:
+    if len(payload) < 4 or not payload.startswith(b"\xff\xd8"):
+        return payload
+    out = bytearray()
+    out.extend(payload[0:2])  # SOI
+    offset = 2
+    length = len(payload)
+    while offset + 1 < length:
+        if payload[offset] != 0xFF:
+            out.extend(payload[offset:])
+            break
+        marker_start = offset
+        while offset < length and payload[offset] == 0xFF:
+            offset += 1
+        if offset >= length:
+            break
+        marker = payload[offset]
+        offset += 1
+        if marker == 0xDA:  # SOS: rest is entropy-coded
+            out.extend(payload[marker_start:])
+            break
+        if marker == 0xD9:  # EOI
+            out.extend(payload[marker_start:])
+            break
+        if offset + 1 > length:
+            break
+        seg_len = int.from_bytes(payload[offset:offset + 2], "big")
+        segment_end = offset + seg_len
+        if segment_end > length:
+            break
+        if 0xE0 <= marker <= 0xEF:
+            # Skip APP segments entirely.
+            offset = segment_end
+            continue
+        out.extend(payload[marker_start:segment_end])
+        offset = segment_end
+    return bytes(out)
 
 def decode_to_rgb(payload: bytes, stream_format: StreamFormat, frame: FrameInfo):
     """Convert a raw payload into an RGB image (numpy array).

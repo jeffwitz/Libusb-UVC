@@ -19,8 +19,18 @@ options:
   GStreamer without H.264 hardware.  The bundled GStreamer pipeline already
   handles MJPEG, H.264, and H.265 (``jpegdec``/``avdec_h26*``) while PyAV covers
   MJPEG + H.264/HEVC in software.
+* ``--record`` — write compressed payloads directly to disk without re-encoding. MJPEG streams are forced
+  to ``.avi`` containers, while frame-based formats are stored as Matroska ``.mkv`` files so H.264/H.265
+  players (VLC/mpv/ffplay) can consume them immediately. The helper derives timestamps from the negotiated
+  FPS when the firmware omits PTS fields, avoiding the “double speed” playback effect.
+* ``--device-id`` / ``--device-sn`` / ``--device-path`` — target a specific camera when multiple devices share
+  the same VID/PID. You can copy the ``VID:PID`` string straight from ``lsusb`` (hex or decimal); add a serial
+  number or USB topology (``BUS:PORT[.PORT…]``) to select one unit deterministically.
 * ``--duration`` — automatically stop after ``N`` seconds.
 
+When ``--record`` is combined with ``--decoder auto``, PyAV is preferred; if PyAV is not installed the script
+falls back to the GStreamer recorder for MJPEG. For frame-based codecs a decoder backend is mandatory so the
+tool raises a clear error when neither PyAV nor GStreamer are available.
 ``uvc_capture_frame.py``
 ------------------------
 
@@ -111,6 +121,16 @@ Inspect Extension Unit (XU) selectors and write a JSON skeleton that can be
 added to ``src/libusb_uvc/quirks``. Use ``--single`` together with ``--output``
 to save a ready-to-edit file for the target GUID.
 
+``uvc_capture_stereo.py``
+-------------------------
+
+Synchronise two identical UVC cameras by running dual producer threads pinned to
+dedicated CPU cores.  The helper uses a barrier to align stream start, drains
+per-camera queues (`--pairing-mode latest`) or processes them FIFO, and supports
+auto-calibration of the steady-state delta as well as manual overrides.  See
+:doc:`stereo_sync` for the full strategy plus a recommended command line that
+yielded sub-5 ms pairing error on dual HDMI grabbers.
+
 Integrating Scripts
 -------------------
 
@@ -122,9 +142,10 @@ quickly.
 Future Work
 -----------
 
-- **Compressed payload codecs (H.264/H.265/AV1/VP8)**: support is not yet
-  implemented; handling those streams would require parsing their specific UVC
-  payload headers and integrating suitable decoders.
+- **Next-generation compressed codecs (AV1/VP8)**: MJPEG, H.264, and H.265 now
+  benefit from shared decoder/recorder plumbing, but AV1/VP8 devices will need
+  dedicated payload parsers plus matching muxer presets before they can be
+  supported out of the box.
 - **UVC still-image capture**: Method 1 and Method 2 negotiation work, but
   completing the feature still demands per-device testing (multiple sensors,
   proprietary compression settings, bulk endpoints).
