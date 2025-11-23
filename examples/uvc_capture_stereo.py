@@ -95,8 +95,10 @@ def frame_producer(
     camera: UVCCamera,
     frame_queue: queue.Queue,
     stop_event: threading.Event,
-    start_barrier: threading.Barrier,
+    probe_barrier: threading.Barrier,
+    commit_barrier: threading.Barrier,
     start_event: threading.Event,
+    restart_event: threading.Event,
     args: argparse.Namespace,
     label: str,
     core_id: Optional[int] = None,
@@ -115,37 +117,86 @@ def frame_producer(
             except (psutil.Error, ValueError) as exc:
                 LOG.warning("Failed to set affinity for %s: %s", label, exc)
 
-        stream = camera.stream(
-            width=args.width,
-            height=args.height,
-            codec=args.codec,
-            decoder=args.decoder,
-            frame_rate=args.fps if args.fps > 0 else None,
-            queue_size=args.stream_queue,
-        )
-        start_barrier.wait()
-        start_event.wait()
-        if start_delay > 0:
-            LOG.info("%s delaying post-barrier start by %.3f ms", label, start_delay * 1000)
-            time.sleep(start_delay)
+        while not stop_event.is_set():
+            try:
+                # 1. PROBE (Variable time)
+                stream_format, frame = camera.select_stream(
+                    width=args.width,
+                    height=args.height,
+                    codec=args.codec,
+                    frame_rate=args.fps if args.fps > 0 else None,
+                )
+                negotiation = camera.probe_stream(stream_format, frame, frame_rate=args.fps if args.fps > 0 else None)
+                
+                # 2. SYNC
+                try:
+                    probe_barrier.wait(timeout=5.0)
+                except threading.BrokenBarrierError:
+                    if stop_event.is_set():
+                        break
+                    probe_barrier.reset()
+                    continue
 
-        with stream as frames:
-            for frame in frames:
+                # 3. COMMIT (Fast & Deterministic)
+                camera.commit_stream(negotiation)
+                try:
+                    commit_barrier.wait(timeout=5.0)
+                except threading.BrokenBarrierError:
+                    if stop_event.is_set():
+                        break
+                    commit_barrier.reset()
+                    continue
+
+                # 4. STREAM (Skip configuration)
+                stream = camera.stream(
+                    width=args.width,
+                    height=args.height,
+                    codec=args.codec,
+                    decoder=args.decoder,
+                    frame_rate=args.fps if args.fps > 0 else None,
+                    queue_size=args.stream_queue,
+                    configure=False,  # Already configured
+                )
+                
+                start_event.wait()
+                if start_delay > 0:
+                    LOG.info("%s delaying post-barrier start by %.3f ms", label, start_delay * 1000)
+                    time.sleep(start_delay)
+
+                with stream as frames:
+                    for frame in frames:
+                        if stop_event.is_set() or restart_event.is_set():
+                            break
+                        packet = FramePacket(
+                            frame=frame,
+                            host_ts=time.monotonic(),
+                            pts=getattr(frame, "pts", getattr(frame, "timestamp", None)),
+                        )
+                        try:
+                            frame_queue.put_nowait(packet)
+                        except queue.Full:
+                            try:
+                                frame_queue.get_nowait()
+                            except queue.Empty:
+                                pass
+                            frame_queue.put_nowait(packet)
+                
                 if stop_event.is_set():
                     break
-                packet = FramePacket(
-                    frame=frame,
-                    host_ts=time.monotonic(),
-                    pts=getattr(frame, "pts", getattr(frame, "timestamp", None)),
-                )
-                try:
-                    frame_queue.put_nowait(packet)
-                except queue.Full:
-                    try:
-                        frame_queue.get_nowait()
-                    except queue.Empty:
-                        pass
-                    frame_queue.put_nowait(packet)
+                
+                if restart_event.is_set():
+                    LOG.info("%s restarting stream...", label)
+                    # Wait for main thread to clear the restart signal before retrying
+                    while restart_event.is_set() and not stop_event.is_set():
+                        time.sleep(0.1)
+                    continue
+
+            except Exception as exc:
+                LOG.error("Producer %s loop error: %s", label, exc)
+                if stop_event.is_set():
+                    break
+                time.sleep(1.0)
+
     except Exception as exc:  # pragma: no cover - diagnostic path
         LOG.exception("Producer %s failed: %s", label, exc)
     finally:
@@ -159,7 +210,7 @@ def frame_producer(
 def _parse_args() -> argparse.Namespace:
     codec_choices = ["auto", "yuyv", "mjpeg", "frame_based", "h264", "h265"]
     decoder_choices = ["auto", "none", "pyav", "gstreamer"]
-    parser = argparse.ArgumentParser(description="Stereo preview (dynamic pairing prototype)")
+    parser = argparse.ArgumentParser(description="Stereo preview (deterministic start)")
     parser.add_argument("--left-index", type=int, default=0, help="Device index of the left camera")
     parser.add_argument("--right-index", type=int, default=1, help="Device index of the right camera")
     parser.add_argument("--device-id", help="VID:PID shared by both cameras (hex or decimal)")
@@ -195,13 +246,6 @@ def _parse_args() -> argparse.Namespace:
         help="Queue consumption strategy",
     )
     parser.add_argument("--print-deltas", action="store_true", help="Print pairing deltas")
-    parser.add_argument("--target-delta-ms", type=float, help="Expected steady-state host delta (ms)")
-    parser.add_argument(
-        "--calibration-pairs",
-        type=int,
-        default=20,
-        help="Number of initial pairs to average before locking target delta (0 disables)",
-    )
     parser.add_argument(
         "--stats-interval",
         type=int,
@@ -210,6 +254,21 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--display", action="store_true", help="Show OpenCV preview")
     parser.add_argument("--log-level", default="INFO")
+    
+    # Restart-to-Sync arguments
+    parser.add_argument(
+        "--restart-threshold-ms",
+        type=float,
+        default=0.0,
+        help="Max allowed host delta at startup (ms). If exceeded, restart streams. 0 disables.",
+    )
+    parser.add_argument(
+        "--max-retries",
+        type=int,
+        default=5,
+        help="Maximum number of restart attempts",
+    )
+
     args = parser.parse_args()
     logging.basicConfig(level=args.log_level.upper())
 
@@ -221,8 +280,7 @@ def _parse_args() -> argparse.Namespace:
     args.left_start_delay = max(args.left_start_delay_ms, 0.0) / 1000.0
     args.right_start_delay = max(args.right_start_delay_ms, 0.0) / 1000.0
     args.pairing_mode = args.pairing_mode.lower()
-    args.target_delta = args.target_delta_ms / 1000.0 if args.target_delta_ms is not None else None
-    args.calibration_pairs = max(args.calibration_pairs, 0)
+    args.restart_threshold = args.restart_threshold_ms / 1000.0 if args.restart_threshold_ms > 0 else None
     return args
 
 
@@ -278,8 +336,12 @@ def main() -> int:
     left_queue: queue.Queue = queue.Queue(maxsize=args.queue_size)
     right_queue: queue.Queue = queue.Queue(maxsize=args.queue_size)
     stop_event = threading.Event()
-    start_barrier = threading.Barrier(3)
+    
+    # Barriers for synchronized PROBE and COMMIT
+    probe_barrier = threading.Barrier(2)
+    commit_barrier = threading.Barrier(2)
     start_event = threading.Event()
+    restart_event = threading.Event()
 
     left_thread = threading.Thread(
         target=frame_producer,
@@ -287,8 +349,10 @@ def main() -> int:
             left_cam,
             left_queue,
             stop_event,
-            start_barrier,
+            probe_barrier,
+            commit_barrier,
             start_event,
+            restart_event,
             args,
             "left",
             args.left_core,
@@ -303,8 +367,10 @@ def main() -> int:
             right_cam,
             right_queue,
             stop_event,
-            start_barrier,
+            probe_barrier,
+            commit_barrier,
             start_event,
+            restart_event,
             args,
             "right",
             args.right_core,
@@ -316,24 +382,28 @@ def main() -> int:
     left_thread.start()
     right_thread.start()
 
-    start_barrier.wait()
-    time.sleep(0.2)
-    _flush_queue(left_queue)
-    _flush_queue(right_queue)
+    # Wait for threads to be ready (optional, threads manage their own barriers)
+    time.sleep(1.0) 
     start_event.set()
 
     left_frame: Optional[FramePacket] = None
     right_frame: Optional[FramePacket] = None
     drain_latest = args.pairing_mode == "latest"
 
-    calibration_remaining = args.calibration_pairs
     accumulated_delta = 0.0
     pair_count = 0
     drop_left = 0
     drop_right = 0
     stats_next = args.stats_interval if args.stats_interval else None
 
-    target_delta = args.target_delta
+    # Target delta is always 0.0 for deterministic start
+    target_delta = 0.0
+    
+    # Verdict Phase variables
+    verdict_pairs_needed = 10 if args.restart_threshold else 0
+    verdict_deltas = []
+    retries_remaining = args.max_retries
+
     if args.display and cv2 is None:
         raise RuntimeError("OpenCV is required when --display is specified")
     if args.display:
@@ -356,14 +426,45 @@ def main() -> int:
             if left_pts_sec is not None and right_pts_sec is not None:
                 pts_delta = left_pts_sec - right_pts_sec
 
-            if target_delta is None and calibration_remaining > 0:
-                accumulated_delta += host_delta
-                calibration_remaining -= 1
-                if calibration_remaining == 0:
-                    target_delta = accumulated_delta / max(args.calibration_pairs, 1)
-                    LOG.info("Calibration locked target delta at %.3f ms", target_delta * 1000)
+            # Verdict Phase Logic
+            if verdict_pairs_needed > 0:
+                verdict_deltas.append(host_delta)
+                verdict_pairs_needed -= 1
+                if verdict_pairs_needed == 0:
+                    avg_delta = sum(verdict_deltas) / len(verdict_deltas)
+                    LOG.info("Verdict: avg_delta=%.3f ms (threshold=%.3f ms)", avg_delta * 1000, args.restart_threshold * 1000)
+                    
+                    if abs(avg_delta) > args.restart_threshold:
+                        if retries_remaining > 0:
+                            LOG.warning("Alignment failed. RESTARTING streams... (%d retries left)", retries_remaining)
+                            retries_remaining -= 1
+                            
+                            # Trigger restart
+                            restart_event.set()
+                            start_event.clear()
+                            
+                            # Wait a bit for threads to react
+                            time.sleep(0.5)
+                            
+                            # Flush queues
+                            _flush_queue(left_queue)
+                            _flush_queue(right_queue)
+                            left_frame = None
+                            right_frame = None
+                            verdict_deltas = []
+                            verdict_pairs_needed = 10
+                            
+                            # Reset barriers (threads handle reset, but we ensure state is clean)
+                            # Release restart signal
+                            restart_event.clear()
+                            start_event.set()
+                            continue
+                        else:
+                            LOG.error("Max retries reached. Proceeding with best effort.")
+                    else:
+                        LOG.info("Alignment accepted.")
 
-            effective_delta = host_delta - (target_delta or 0.0)
+            effective_delta = host_delta - target_delta
             if abs(effective_delta) > args.max_ts_diff:
                 if effective_delta < 0:
                     left_frame = None
@@ -375,8 +476,6 @@ def main() -> int:
 
             if args.print_deltas:
                 message = f"Δhost={(host_delta)*1000:+.3f} ms"
-                if target_delta:
-                    message += f" (centered {effective_delta*1000:+.3f} ms)"
                 if pts_delta is not None:
                     message += f" ΔPTS={pts_delta*1000:+.3f} ms"
                 print(message)
@@ -406,7 +505,7 @@ def main() -> int:
                     pair_count,
                     drop_left,
                     drop_right,
-                    (target_delta or 0.0) * 1000,
+                    target_delta * 1000,
                 )
     except KeyboardInterrupt:
         LOG.info("Interrupted by user")

@@ -15,18 +15,18 @@ Architecture Overview
 
 The script relies on three coordinated threads:
 
-* **Main consumer** – pairs frames, applies calibration, logs/plots results, and
-  drives the OpenCV preview.
-* **Left producer** – opens the left camera, negotiates PROBE/COMMIT, captures
-  frames, and pushes them into a bounded queue.
-* **Right producer** – identical to the left producer but targeting the other
-  camera.
+* **Main consumer** – pairs frames, logs/plots results, and drives the OpenCV preview.
+* **Left producer** – opens the left camera, negotiates PROBE, waits for barrier, commits, and captures frames.
+* **Right producer** – identical to the left producer but targeting the other camera.
 
-A ``threading.Barrier`` (size 3) ensures that both producers have completed the
-USB negotiation before any frames are consumed.  Once the barrier releases, the
-main thread flushes stray buffers, sets a ``start_event`` semaphore, and each
-producer can optionally sleep for ``--*-start-delay-ms`` to compensate for hub or
-bus asymmetries before entering the capture loop.
+A **Split PROBE/COMMIT** strategy is used to ensure deterministic startup:
+
+1.  **PROBE**: Both producers negotiate parameters (bandwidth, format) independently. This phase is variable in duration.
+2.  **Barrier 1**: Wait for both to finish negotiating.
+3.  **COMMIT**: Both producers send the "Start Streaming" command almost simultaneously.
+4.  **Barrier 2**: Wait for both to confirm the stream is active.
+
+This ensures that the "time zero" for both cameras is as close as possible, regardless of USB bus latency differences.
 
 Queueing and Drop Policy
 ------------------------
@@ -53,17 +53,13 @@ Every queued frame carries two timestamps:
     Hardware timestamp provided by the camera firmware, when available.  Not all
     devices expose this field.
 
-The consumer works in three stages:
+The consumer uses a **Target 0ms** strategy:
 
-1. **Calibration** – ``--calibration-pairs N`` averages the first *N* host deltas
-   to estimate the steady-state offset between cameras.  Once collected, the
-   script locks on the derived target and recentres future deltas around it.
-2. **Manual override** – ``--target-delta-ms`` can be set when the expected
-   offset is already known (for example ``-36``).  Set
-   ``--calibration-pairs 0`` to skip auto-calibration.
-3. **Tolerance** – ``--max-ts-diff`` (seconds) defines the pairing window after
-   recentering.  Frames outside this window are dropped so the capture remains
-   real-time.
+1.  **Deterministic Start**: Thanks to the PROBE/COMMIT split, we assume the cameras start simultaneously.
+2.  **Zero Target**: The script aims for a host delta of 0ms.
+3.  **Tolerance**: ``--max-ts-diff`` (seconds) defines the pairing window. Frames outside this window are dropped.
+
+If one camera lags (e.g., due to a dropped packet), the delta will exceed the tolerance. The script will drop the older frame from the "leading" camera to allow the "lagging" camera to catch up, effectively realigning the streams to the nearest frame.
 
 PTS deltas are logged when present, but the pairing decision is driven by the
 host delta because many firmwares omit valid PTS.
@@ -77,6 +73,20 @@ CPU.  The consumer stays on the default scheduler, which keeps the UI
 responsive.  Producers are daemon threads: ``Ctrl+C`` or window close events set
 the shared ``stop_event``, join the streams, close the cameras, and destroy the
 OpenCV window.
+
+Restart-to-Sync (Brute Force)
+-----------------------------
+
+For applications requiring sub-millisecond precision, the script supports a **Restart-to-Sync** mode. Since the initial phase offset between two independent USB cameras is random, we can "roll the dice" until we get a lucky alignment.
+
+*   ``--restart-threshold-ms``: Maximum allowed average offset (in milliseconds) during the startup phase.
+*   ``--max-retries``: Number of times to restart the streams if the threshold is exceeded.
+
+**How it works:**
+1.  Streams start using the deterministic PROBE/COMMIT sequence.
+2.  The consumer measures the average host delta over the first 10 frames.
+3.  If ``abs(delta) > threshold``, both streams are stopped and restarted.
+4.  This repeats until the delta is within tolerance or retries are exhausted.
 
 Recommended Command
 -------------------
@@ -95,28 +105,26 @@ results (5 FPS MJPEG, minimal latency):
        --codec mjpeg --decoder pyav \
        --max-ts-diff 0.050 \
        --pairing-mode latest \
-       --calibration-pairs 30 \
+       --restart-threshold-ms 5 \
        --print-deltas --display \
        --left-core 2 --right-core 3 \
-       --left-start-delay-ms 0 --right-start-delay-ms 60
+       --left-start-delay-ms 0 --right-start-delay-ms 0
 
 Key takeaways:
 
 * Lowering FPS and using MJPEG reduces the USB bandwidth requirement and decoder
   workload.
-* The 60 ms post-barrier delay pushes the slower bus to “catch up” on this
-  hardware.
-* ``--print-deltas`` shows both the raw host delta and the centred value (after
-  calibration) so you can monitor drift in real time.
+* ``--restart-threshold-ms 5`` ensures that the script will retry until the cameras are aligned within 5ms.
+* ``--print-deltas`` shows the raw host delta. It should stay close to 0ms.
+* If you see a constant offset, check your USB topology (e.g., one camera on a hub, one direct).
 
 Tuning Checklist
 ----------------
 
-1. Start with ``--calibration-pairs 0 --print-deltas`` to inspect the raw delta.
-2. Decide whether to rely on auto-calibration or set ``--target-delta-ms``.
+1. Start with ``--print-deltas`` to inspect the raw delta.
+2. If the delta is consistently > 20ms, ensure you are using the new PROBE/COMMIT logic (it's automatic).
 3. Trim ``--stream-queue`` and ``--queue-size`` if the preview feels laggy.
-4. Adjust ``--left/right-start-delay-ms`` after you know which camera leads.
-5. When PTS deltas diverge but host deltas remain stable, suspect firmware clock
+4. When PTS deltas diverge but host deltas remain stable, suspect firmware clock
    drift and fall back to host-only pairing.
 
 Following this process should keep the pairing error within a few milliseconds

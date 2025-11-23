@@ -1557,9 +1557,30 @@ def _perform_probe_commit_with_length(
             "chosen_interval": negotiation_info.get("dwFrameInterval"),
             "requested_rate_hz": frame_rate,
             "committed": do_commit,
+            "raw_payload": negotiated_bytes,
         }
     )
     return negotiation_info
+
+
+def perform_commit(
+    dev: usb.core.Device,
+    interface_number: int,
+    negotiated_bytes: bytes,
+    commit_selector: int = VS_COMMIT_CONTROL,
+) -> None:
+    """Execute the VS_COMMIT control transfer with the negotiated payload."""
+    try:
+        LOG.debug("SET_CUR selector=0x%02x payload=%s", commit_selector, _hex_dump(negotiated_bytes))
+        _write_control(dev, SET_CUR, commit_selector, interface_number, negotiated_bytes)
+    except usb.core.USBError as exc:
+        LOG.debug(
+            "SET_CUR selector=0x%02x failed errno=%s payload=%s",
+            commit_selector,
+            getattr(exc, "errno", None),
+            _hex_dump(negotiated_bytes),
+        )
+        raise
 
 
 def _parse_still_probe_payload(payload: bytes) -> dict:
@@ -2479,6 +2500,7 @@ class UVCCamera:
         timeout_ms: int = 2000,
         duration: Optional[float] = None,
         record_to: Optional[Union[str, pathlib.Path]] = None,
+        configure: bool = True,
     ) -> "FrameStream":
         """Return a managed frame iterator for continuous streaming.
 
@@ -2490,6 +2512,9 @@ class UVCCamera:
             and defer decoding.  MJPEG and uncompressed formats ignore this setting.
         record_to:
             Optional file path for writing the compressed payloads (requires a decoder backend that supports recording).
+        configure:
+            If True (default), run PROBE/COMMIT negotiation. If False, assume the
+            stream is already configured (e.g. via manual probe_stream/commit_stream).
         """
 
         stream_format, frame = self.select_stream(
@@ -2514,19 +2539,18 @@ class UVCCamera:
             duration=duration,
             decoder_preference=decoder,
             record_path=record_to,
+            configure=configure,
         )
 
-    def configure_stream(
+    def probe_stream(
         self,
         stream_format: StreamFormat,
         frame: FrameInfo,
         frame_rate: Optional[float] = None,
-        alt_setting: Optional[int] = None,
         *,
         strict_fps: bool = False,
     ) -> dict:
-        """Probe and commit the requested format/frame, preparing for streaming."""
-
+        """Negotiate streaming parameters without committing (VS_PROBE only)."""
         self._ensure_claimed()
 
         candidate_fps: List[Optional[float]] = []
@@ -2561,7 +2585,7 @@ class UVCCamera:
                     continue
                 try:
                     LOG.debug(
-                        "Attempting PROBE/COMMIT with fps=%s bmHint=%s (format=%s frame=%s)",
+                        "Attempting VS_PROBE with fps=%s bmHint=%s (format=%s frame=%s)",
                         fps_candidate,
                         hint,
                         stream_format.format_index,
@@ -2573,12 +2597,15 @@ class UVCCamera:
                         stream_format,
                         frame,
                         fps_candidate,
-                        do_commit=True,
+                        do_commit=False,
                         bm_hint=hint,
                         strict_interval=strict_fps,
                         payload_hint=payload_hint,
                     )
-                    frame_rate = fps_candidate
+                    # Inject context needed for commit
+                    info["_stream_format"] = stream_format
+                    info["_frame"] = frame
+                    info["_negotiated_fps"] = fps_candidate
                     break
                 except usb.core.USBError as exc:
                     last_error = exc
@@ -2591,7 +2618,20 @@ class UVCCamera:
         if info is None:
             raise last_error or UVCError("Failed to negotiate streaming parameters")
 
-        required_payload = info.get("dwMaxPayloadTransferSize") or frame.max_frame_size
+        return info
+
+    def commit_stream(self, negotiation_info: dict, alt_setting: Optional[int] = None) -> dict:
+        """Commit the negotiated parameters and select the alternate setting."""
+        raw_payload = negotiation_info.get("raw_payload")
+        if not raw_payload:
+            raise UVCError("Negotiation info missing raw_payload; was probe_stream called?")
+
+        perform_commit(self.device, self.interface_number, raw_payload)
+        negotiation_info["committed"] = True
+
+        stream_format = negotiation_info["_stream_format"]
+        frame = negotiation_info["_frame"]
+        required_payload = negotiation_info.get("dwMaxPayloadTransferSize") or frame.max_frame_size
         if required_payload is None or required_payload <= 0:
             required_payload = frame.max_frame_size or 0
 
@@ -2623,11 +2663,11 @@ class UVCCamera:
         self._format = stream_format
         self._frame = frame
 
-        frame_interval = info.get("dwFrameInterval") or frame.default_interval or 0
+        frame_interval = negotiation_info.get("dwFrameInterval") or frame.default_interval or 0
         fps = 1e7 / frame_interval if frame_interval else None
         frame_bytes = frame.max_frame_size or (frame.width * frame.height * 2)
         iso_capacity = alt.max_packet_size * 8000 if alt.max_packet_size else 0
-        payload_info = info.get("dwMaxPayloadTransferSize") or 0
+        payload_info = negotiation_info.get("dwMaxPayloadTransferSize") or 0
 
         LOG.debug(
             "Negotiated ctrl: fmt_idx=%s frame_idx=%s interval=%s (fps=%.3f) dwMaxPayload=%s dwMaxFrame=%s",
@@ -2651,10 +2691,11 @@ class UVCCamera:
         if stream_format.subtype == VS_FORMAT_UNCOMPRESSED:
             if fps and frame_bytes and iso_capacity and fps * frame_bytes > iso_capacity:
                 LOG.warning(
-                    "Alt setting %s provides %.2f MB/s < required %.2f MB/s; expect truncated frames",
-                    alt.alternate_setting,
-                    iso_capacity / 1e6,
-                    fps * frame_bytes / 1e6,
+                    "Bandwidth warning: %.2f fps * %s bytes = %s B/s > ISO capacity %s B/s",
+                    fps,
+                    frame_bytes,
+                    fps * frame_bytes,
+                    iso_capacity,
                 )
 
         LOG.debug(
@@ -2682,6 +2723,19 @@ class UVCCamera:
         self._committed_frame_index = frame.frame_index
 
         return info
+
+    def configure_stream(
+        self,
+        stream_format: StreamFormat,
+        frame: FrameInfo,
+        frame_rate: Optional[float] = None,
+        alt_setting: Optional[int] = None,
+        *,
+        strict_fps: bool = False,
+    ) -> dict:
+        """Probe and commit the requested format/frame, preparing for streaming."""
+        info = self.probe_stream(stream_format, frame, frame_rate, strict_fps=strict_fps)
+        return self.commit_stream(info, alt_setting=alt_setting)
 
     def configure_resolution(
         self,
@@ -3419,6 +3473,7 @@ class FrameStream:
         duration: Optional[float],
         decoder_preference: Optional[Union[str, DecoderPreference, Iterable[str]]] = None,
         record_path: Optional[Union[str, pathlib.Path]] = None,
+        configure: bool = True,
     ) -> None:
         self._camera = camera
         self._format = stream_format
@@ -3434,6 +3489,7 @@ class FrameStream:
         self._duration = duration
         self._decoder_preference = decoder_preference
         self._decoder_order = _normalise_decoder_preference(decoder_preference)
+        self._configure = configure
         self._decoder_failures: Set[str] = set()
         self._decoder_backend_name: Optional[str] = None
         self._decoder_backend_key: Optional[str] = None
@@ -3497,18 +3553,20 @@ class FrameStream:
             )
 
     def __enter__(self) -> "FrameStream":
-        negotiation = self._camera.configure_stream(
-            self._format,
-            self._frame,
-            frame_rate=self._frame_rate,
-            strict_fps=self._strict_fps,
-        )
-        LOG.debug("FrameStream negotiation: %s", negotiation)
-        self._negotiated_fps = (
-            negotiation.get("calculated_fps")
-            or negotiation.get("frame_rate_hz")
-            or self._frame_rate
-        )
+        if self._configure:
+            negotiation = self._camera.configure_stream(
+                self._format,
+                self._frame,
+                frame_rate=self._frame_rate,
+                strict_fps=self._strict_fps,
+            )
+            LOG.debug("FrameStream negotiation: %s", negotiation)
+            self._negotiated_fps = (
+                negotiation.get("calculated_fps")
+                or negotiation.get("frame_rate_hz")
+                or self._frame_rate
+            )
+        
         if self._negotiated_fps:
             LOG.info("Stream running at %.2f fps", self._negotiated_fps)
 
@@ -3524,7 +3582,7 @@ class FrameStream:
         self._stop_event.clear()
         self._active = True
 
-        self._poll_thread = threading.Thread(target=self._poll_loop, name="uvc-frame-poll", daemon=True)
+        self._poll_thread = threading.Thread(target=self._poll_loop, name="uvc-poll", daemon=True)
         self._poll_thread.start()
 
         return self
