@@ -51,6 +51,21 @@ any other helper without memorising script-specific flag names.
   (`--min-ms` / `--max-ms`), and reuses the streaming flags above so you can
   match the preview configuration exactly.
 
+## Stereo Synchronisation
+
+- `uvc_capture_stereo.py` — Deterministic PROBE/COMMIT preview that launches two producer
+  threads, pairs frames either FIFO or with timestamp-aware drops, and can restart the
+  streams until the initial host delta falls under a threshold. Ideal for inspecting
+  a rig’s behaviour before applying any corrective action. See `docs/stereo_sync.rst`
+  for background and tuning tips.
+- `uvc_stereo_phase_sync.py` — Closed-loop “firmware nudge” controller that disables auto
+  exposure, aligns buffers, then issues bursts of redundant `SET_CUR` exposure calls on
+  the leading camera whenever `|Δ|` exceeds `--tolerance-ms`. Supports pairing modes
+  (`sync`, `soft-sync`, `fifo`, `monitor`), per-camera ramp parameters
+  (`--nudge-ramp-*`), and the integral gain/limit settings (`--nudge-gain`,
+  `--nudge-max-per-cycle`) documented in detail inside `docs/stereo_sync.rst`. Use
+  `--print-deltas` plus `--duration` to capture reproducible timing runs.
+
 ## Still-Image Capture
 
 - `uvc_capture_still.py` — Negotiate still-image settings (Method 1 and Method

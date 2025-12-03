@@ -174,6 +174,23 @@ yielded sub-5 ms pairing error on dual HDMI grabbers. Run-time controls includ
 brute-force re-launch strategy, and ``--csv``/``--record-left``/``--record-right`` for
 persisting timing or compressed payloads.
 
+``uvc_stereo_phase_sync.py``
+----------------------------
+
+Implements the closed-loop “firmware nudge” strategy described in
+:doc:`stereo_sync`.  After disabling auto exposure on both cameras and aligning
+their FIFO buffers, the helper continuously measures the timestamp delta and, if it
+exceeds ``--tolerance-ms``, overloads the leading camera’s control bus with a burst
+of redundant ``SET_CUR`` requests (see ``--nudge-iterations`` /
+``--nudge-step-units``).  The per-camera ramp (``--nudge-ramp-*``) keeps those
+nudges symmetrical and automatically backs off once the hardware settles.  Pairing
+modes (``sync``, ``soft-sync``, ``fifo``, ``monitor``) determine whether frames are
+dropped to minimise jitter or preserved to expose the physical offset.  Start with
+the defaults—``--pairing-mode sync`` and ``--nominal-exposure-ms`` appropriate for
+your sensor—and enable ``--print-deltas`` plus ``--duration`` to capture reproducible
+timing runs.  When fine-grained guidance is needed (e.g., tuning ``--nudge-gain`` or
+``--monitor-window-ms``), refer back to :doc:`stereo_sync`.
+
 Integrating Scripts
 -------------------
 
