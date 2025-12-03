@@ -2706,7 +2706,7 @@ class UVCCamera:
             self._max_payload,
         )
 
-        info.update(
+        negotiation_info.update(
             {
                 "selected_alt": alt.alternate_setting,
                 "iso_packet_size": alt.max_packet_size,
@@ -2722,7 +2722,7 @@ class UVCCamera:
         self._committed_format_index = stream_format.format_index
         self._committed_frame_index = frame.frame_index
 
-        return info
+        return negotiation_info
 
     def configure_stream(
         self,

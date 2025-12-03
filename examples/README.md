@@ -4,6 +4,22 @@ The `examples/` directory provides ready-to-run scripts illustrating how to use
 the high-level `libusb_uvc` API.  Each helper focuses on a specific feature of
 the library.
 
+## Shared CLI Options
+
+All scripts rely on the helpers in `examples/uvc_cli.py`, so device selection
+and streaming arguments are identical across utilities:
+
+- `--device-id / --device-sn / --device-path / --device-index` choose a specific
+  camera, while `--interface` selects the Video Streaming interface.
+- `--width / --height / --fps / --strict-fps / --skip-frames / --timeout / --duration`
+  control stream negotiation and runtime behaviour.
+- `--codec` chooses the advertised format (`auto`, `yuyv`, `mjpeg`, `frame-based`,
+  `h264`, `h265`). `--decoder` selects the backend for compressed payloads
+  (`auto`, `none`, `pyav`, `gstreamer`) and applies to MJPEG as well when forced.
+
+Once you find a working combination, you can reuse the exact same arguments on
+any other helper without memorising script-specific flag names.
+
 ## Camera Inspection and Introspection
 
 - `uvc_inspect.py` — Enumerate Video Streaming (VS) interfaces, formats, frames,
@@ -22,12 +38,18 @@ the library.
   decoder backends when available).  Offers format listing (`--list`) and sensor
   selection via `--interface`.
 - `uvc_capture_frame.py` — Grab a single frame and save it to disk. Supports
-  direct MJPEG saving or conversion to PNG when OpenCV is installed.
+  direct MJPEG saving or conversion to PNG when OpenCV is installed, and now
+  honours the same streaming parameters as the preview helper (including the
+  decoder selection and optional `--duration` timeout override).
 - `uvc_display_frame.py` — Matplotlib-based frame rendering with automatic
-  fallback to saving images when no display is available.
+  fallback to saving images when no display is available. Shares the preview
+  helper’s streaming flags for consistency.
 - `uvc_led_preview.py` — Toggle LED controls while keeping a preview running.
 - `exposure_sweep.py` — Disable auto-exposure and sweep the absolute exposure
-  value across its supported range.
+  value across its supported range. Accepts `--frames / --steps`, the microsecond
+  range (`--min-exposure-us` / `--max-exposure-us`) or millisecond shortcuts
+  (`--min-ms` / `--max-ms`), and reuses the streaming flags above so you can
+  match the preview configuration exactly.
 
 ## Still-Image Capture
 
@@ -39,4 +61,3 @@ the library.
 
 All scripts accept `--vid/--pid` filters and optional logging flags to help
 diagnose issues.  Invoke any helper with `--help` to view supported options.
-

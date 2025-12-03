@@ -220,6 +220,7 @@ behaviour of the barrier-based start (5 FPS MJPEG, minimal latency):
        --max-ts-diff 0.050 \
        --pairing-mode latest \
        --restart-threshold-ms 5 \
+       --duration 15 \
        --print-deltas --display \
        --left-core 2 --right-core 3 \
        --left-commit-delay-ms 0 --right-commit-delay-ms 0
@@ -237,6 +238,9 @@ Key takeaways:
   measure a stable initial ``Δhost`` offset, then re-launch with a matching
   delay on the leading side to see whether the firmware re-aligns its internal
   pipeline.
+* ``--duration`` now stops the capture loop automatically, which is useful when
+  collecting timed samples or when running unattended tests. Set it to ``0`` to
+  keep the legacy “run until Ctrl+C” behaviour.
 * ``--print-deltas`` shows the raw host delta. It often reveals a residual
   offset even when the barrier logic is in place.
 * If you see a constant offset or large jitter, assume the device firmware is

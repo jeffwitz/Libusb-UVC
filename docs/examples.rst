@@ -5,6 +5,29 @@ The ``examples/`` directory ships ready-to-run utilities that exercise the
 library's major features. Install libusb-uvc in editable mode to ensure Python
 can locate the package and run the scripts with ``python3``.
 
+Shared Command-Line Flags
+-------------------------
+
+Every helper script pulls its CLI plumbing from :mod:`examples.uvc_cli` so the
+device selection and streaming flags remain consistent:
+
+* ``--device-id`` / ``--device-sn`` / ``--device-path`` / ``--device-index`` and
+  ``--interface`` apply to **all** utilities, allowing deterministic selection
+  of multiple cameras on the same machine.
+* ``--width`` / ``--height`` / ``--fps`` / ``--strict-fps`` – resolution,
+  optional frame-rate hint, and the ability to enforce an exact FPS match when
+  the firmware supports it.
+* ``--codec`` / ``--decoder`` – codec preference and decoder backend
+  (``auto``, ``none``, ``pyav``, ``gstreamer``). Supplying a decoder explicitly
+  forces the script to route MJPEG through that backend as well, which is
+  handy when validating GStreamer or PyAV without H.264 sources.
+* ``--skip-frames`` / ``--timeout`` / ``--duration`` – skip a few frames after
+  negotiation, bound the libusb async transfers timeout (milliseconds), and
+  optionally stop automatically after ``N`` seconds.
+
+The individual sections below call out any additional flags layered on top of
+these shared options.
+
 ``uvc_capture_video.py``
 ------------------------
 
@@ -36,14 +59,20 @@ tool raises a clear error when neither PyAV nor GStreamer are available.
 
 Capture a single frame and save to disk. When working with MJPEG streams the
 script can store the payload directly as ``.jpg`` or convert it to PNG via
-OpenCV. Use ``--output`` to select the destination path.
+OpenCV. Use ``--output`` to select the destination path. The helper honours the
+same ``--width``/``--height``/``--fps``/``--codec``/``--decoder``/``--strict-fps``
+arguments as the video preview plus ``--duration`` (defaulting to the timeout-based
+fallback when omitted), which makes it trivial to replicate a preview configuration
+when capturing a still.
 
 ``uvc_display_frame.py``
 ------------------------
 
 Grab one frame and render it with Matplotlib. This helper is useful in
 headless environments because it automatically falls back to saving an image
-when ``$DISPLAY`` is not set.
+when ``$DISPLAY`` is not set. It exposes the same streaming arguments as the
+preview helper, so ``--codec`` / ``--decoder`` / ``--strict-fps`` / ``--duration``
+behave identically.
 
 ``uvc_led_preview.py``
 ----------------------
@@ -112,7 +141,18 @@ hardware behaviour may require per-device reverse engineering.
 
 Disable auto exposure, then linearly sweep ``Exposure Time, Absolute`` across
 its supported range while overlaying the current value on the preview. The
-example demonstrates how to update controls without resetting the stream.
+example demonstrates how to update controls without resetting the stream and now
+reuses the same streaming arguments as the other helpers. Notable flags:
+
+* ``--frames`` (alias ``--steps``) – number of exposure positions to visit.
+* ``--min-exposure-us`` / ``--max-exposure-us`` – sweep range in microseconds.
+  ``--min-ms`` / ``--max-ms`` provide millisecond shortcuts for quick experiments.
+* ``--exposure-unit-us`` – conversion unit (typically 100 µs per step).
+* ``--no-display`` – run headless; combine with ``--log-timing`` to print per-frame
+  delta/FPS information for offline analysis.
+* ``--codec`` / ``--decoder`` / ``--strict-fps`` / ``--timeout`` – inherited from
+  :mod:`uvc_capture_video`, letting you benchmark the sweep with the exact same
+  stream parameters you use elsewhere.
 
 ``uvc_generate_quirk.py``
 -------------------------
@@ -129,7 +169,10 @@ dedicated CPU cores.  The helper uses a barrier to align stream start, drains
 per-camera queues (`--pairing-mode latest`) or processes them FIFO, and supports
 auto-calibration of the steady-state delta as well as manual overrides.  See
 :doc:`stereo_sync` for the full strategy plus a recommended command line that
-yielded sub-5 ms pairing error on dual HDMI grabbers.
+yielded sub-5 ms pairing error on dual HDMI grabbers. Run-time controls include
+``--duration`` (auto-stop after ``N`` seconds), ``--restart-threshold-ms`` for the
+brute-force re-launch strategy, and ``--csv``/``--record-left``/``--record-right`` for
+persisting timing or compressed payloads.
 
 Integrating Scripts
 -------------------

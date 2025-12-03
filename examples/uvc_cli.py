@@ -7,7 +7,7 @@ import importlib
 import logging
 import pathlib
 import sys
-from typing import List, Optional, Tuple
+from typing import List, Optional, Sequence, Tuple
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 SRC_DIR = ROOT / "src"
@@ -119,6 +119,66 @@ def add_device_arguments(parser: argparse.ArgumentParser, *, default_index: Opti
         help="Index within the detected device list",
     )
     parser.add_argument("--interface", type=int, default=1, help="Video streaming interface number")
+
+
+def add_streaming_arguments(
+    parser: argparse.ArgumentParser,
+    *,
+    width_default: Optional[int] = 640,
+    height_default: Optional[int] = 480,
+    width_required: bool = False,
+    height_required: bool = False,
+    fps_default: float = 15.0,
+    skip_default: int = 2,
+    timeout_default: int = 3000,
+    codec_choices: Optional[Sequence[str]] = None,
+    codec_default: Optional[str] = None,
+    codec_help: str = "Preferred codec",
+    include_decoder: bool = False,
+    decoder_choices: Optional[Sequence[str]] = None,
+    decoder_default: Optional[str] = None,
+    decoder_help: str = "Decoder backend for compressed payloads",
+    include_duration: bool = False,
+) -> None:
+    """Add common streaming configuration flags (resolution, FPS, codec, etc)."""
+
+    parser.add_argument(
+        "--width",
+        type=int,
+        default=width_default,
+        required=width_required,
+        help="Desired frame width" if width_required else "Frame width",
+    )
+    parser.add_argument(
+        "--height",
+        type=int,
+        default=height_default,
+        required=height_required,
+        help="Desired frame height" if height_required else "Frame height",
+    )
+    parser.add_argument("--fps", type=float, default=fps_default, help="Target frame rate in Hz (0 = auto)")
+    parser.add_argument("--skip-frames", type=int, default=skip_default, help="Frames to discard before use")
+    parser.add_argument("--timeout", type=int, default=timeout_default, help="Async transfer timeout (ms)")
+    parser.add_argument("--strict-fps", action="store_true", help="Require exact FPS match during PROBE")
+
+    if codec_choices:
+        parser.add_argument(
+            "--codec",
+            choices=codec_choices,
+            default=codec_default if codec_default is not None else codec_choices[0],
+            help=codec_help,
+        )
+
+    if include_decoder and decoder_choices:
+        parser.add_argument(
+            "--decoder",
+            choices=decoder_choices,
+            default=decoder_default if decoder_default is not None else decoder_choices[0],
+            help=decoder_help,
+        )
+
+    if include_duration:
+        parser.add_argument("--duration", type=float, help="Stop streaming after the given seconds")
 
 
 def configure_logging(level: str = "INFO", *, name: Optional[str] = None) -> logging.Logger:

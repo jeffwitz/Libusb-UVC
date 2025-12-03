@@ -10,7 +10,14 @@ from pathlib import Path
 
 import cv2
 
-from uvc_cli import add_device_arguments, apply_device_filters, configure_logging, ensure_repo_import, resolve_device_index
+from uvc_cli import (
+    add_device_arguments,
+    add_streaming_arguments,
+    apply_device_filters,
+    configure_logging,
+    ensure_repo_import,
+    resolve_device_index,
+)
 
 ensure_repo_import()
 from libusb_uvc import (
@@ -61,14 +68,14 @@ def print_streaming_modes(streaming: StreamingInterface) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Live preview via libusb_uvc + OpenCV")
     add_device_arguments(parser)
-    parser.add_argument("--width", type=int, default=640, help="Desired frame width")
-    parser.add_argument("--height", type=int, default=480, help="Desired frame height")
-    parser.add_argument("--fps", type=float, default=15.0, help="Target frame rate in Hz")
-    parser.add_argument("--skip-frames", type=int, default=2, help="Frames to discard before display")
-    parser.add_argument("--timeout", type=int, default=3000, help="Async transfer timeout (ms)")
-    parser.add_argument(
-        "--codec",
-        choices=[
+    add_streaming_arguments(
+        parser,
+        width_default=640,
+        height_default=480,
+        fps_default=15.0,
+        skip_default=2,
+        timeout_default=3000,
+        codec_choices=[
             CodecPreference.AUTO,
             CodecPreference.YUYV,
             CodecPreference.MJPEG,
@@ -76,22 +83,17 @@ def main() -> int:
             CodecPreference.H264,
             CodecPreference.H265,
         ],
-        default=CodecPreference.AUTO,
-        help="Force a specific codec when multiple are available",
-    )
-    parser.add_argument(
-        "--decoder",
-        choices=[
+        codec_default=CodecPreference.AUTO,
+        include_decoder=True,
+        decoder_choices=[
             DecoderPreference.AUTO,
             DecoderPreference.NONE,
             DecoderPreference.PYAV,
             DecoderPreference.GSTREAMER,
         ],
-        default=DecoderPreference.AUTO,
-        help="Select a decoder backend for frame-based formats (experimental)",
+        decoder_default=DecoderPreference.AUTO,
+        include_duration=True,
     )
-    parser.add_argument("--strict-fps", action="store_true", help="Require exact FPS match during PROBE")
-    parser.add_argument("--duration", type=float, help="Automatically stop preview after the given seconds")
     parser.add_argument("--list", action="store_true", help="List formats for the interface and exit")
     parser.add_argument("--record", type=Path, help="Write compressed payloads to this file (requires PyAV decoder)")
     parser.add_argument("--log-level", default="INFO")

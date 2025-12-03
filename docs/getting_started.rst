@@ -72,6 +72,13 @@ Add ``--record ./capture.avi`` (MJPEG) or ``--record ./capture.mkv`` (frame-base
 incoming payloads without re-encoding. Libusb-UVC injects missing SPS/PPS/VPS headers automatically so
 H.264/H.265 recordings play back at the negotiated frame rate.
 
+All preview/capture helpers import their argument plumbing from
+:mod:`examples.uvc_cli`, so the ``--width``/``--height``/``--fps``/``--strict-fps``/
+``--codec``/``--decoder``/``--skip-frames``/``--timeout``/``--duration`` flags work
+identically across scripts. Once you find a combination that your camera accepts,
+you can use the same parameters on ``uvc_capture_frame.py``, ``uvc_display_frame.py``,
+``exposure_sweep.py``, or the stereo utilities without relearning the CLI.
+
 Targeting a Specific Camera
 ---------------------------
 

@@ -9,11 +9,19 @@ from pathlib import Path
 
 from PIL import Image
 
-from uvc_cli import add_device_arguments, apply_device_filters, configure_logging, ensure_repo_import, resolve_device_index
+from uvc_cli import (
+    add_device_arguments,
+    add_streaming_arguments,
+    apply_device_filters,
+    configure_logging,
+    ensure_repo_import,
+    resolve_device_index,
+)
 
 ensure_repo_import()
 from libusb_uvc import (
     CodecPreference,
+    DecoderPreference,
     FrameInfo,
     StreamFormat,
     UVCCamera,
@@ -72,12 +80,16 @@ def save_frame(output_path: Path, payload: bytes, stream_format: StreamFormat, f
 def main() -> int:
     parser = argparse.ArgumentParser(description="Capture a single UVC frame")
     add_device_arguments(parser)
-    parser.add_argument("--width", type=int, required=True, help="Desired frame width")
-    parser.add_argument("--height", type=int, required=True, help="Desired frame height")
-    parser.add_argument("--fps", type=float, default=15.0, help="Target frame rate in Hz")
-    parser.add_argument(
-        "--codec",
-        choices=[
+    add_streaming_arguments(
+        parser,
+        width_default=None,
+        height_default=None,
+        width_required=True,
+        height_required=True,
+        fps_default=15.0,
+        skip_default=2,
+        timeout_default=5000,
+        codec_choices=[
             CodecPreference.AUTO,
             CodecPreference.YUYV,
             CodecPreference.MJPEG,
@@ -85,10 +97,17 @@ def main() -> int:
             CodecPreference.H264,
             CodecPreference.H265,
         ],
-        default=CodecPreference.AUTO,
+        codec_default=CodecPreference.AUTO,
+        include_decoder=True,
+        decoder_choices=[
+            DecoderPreference.AUTO,
+            DecoderPreference.NONE,
+            DecoderPreference.PYAV,
+            DecoderPreference.GSTREAMER,
+        ],
+        decoder_default=DecoderPreference.AUTO,
+        include_duration=True,
     )
-    parser.add_argument("--skip-frames", type=int, default=2, help="Frames to discard before saving")
-    parser.add_argument("--timeout", type=int, default=5000, help="Capture timeout in milliseconds")
     parser.add_argument("--output", type=Path, required=True, help="Destination file (e.g. frame.jpg)")
     parser.add_argument("--log-level", default="INFO")
     args = parser.parse_args()
@@ -106,16 +125,19 @@ def main() -> int:
         ) as camera:
             print(f"Using device: {describe_device(camera.device)}")
 
+            frame_rate = args.fps if args.fps > 0 else None
+            duration = args.duration if args.duration is not None else max(args.timeout / 1000.0, 1.0)
             stream = camera.stream(
                 width=args.width,
                 height=args.height,
                 codec=args.codec,
-                frame_rate=args.fps if args.fps > 0 else None,
-                strict_fps=False,
+                decoder=args.decoder,
+                frame_rate=frame_rate,
+                strict_fps=args.strict_fps,
                 skip_initial=max(0, args.skip_frames),
                 queue_size=2,
                 timeout_ms=max(args.timeout, 1000),
-                duration=max(args.timeout / 1000.0, 1.0),
+                duration=duration,
             )
 
             captured = None
