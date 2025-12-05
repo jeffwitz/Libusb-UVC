@@ -15,11 +15,14 @@ HDMI grabbers showed that this *alone* does **not** produce stable
 sub-frame synchronisation. Hidden internal pipelines, buffering and clocking
 behaviour inside the devices dominate the startup phase.
 
-By contrast, the **exposure-based phase sliding** implemented in
-``uvc_stereo_phase_sync.py`` has proven reliable on every rig tested so far:
-once both streams are running, a short calibration window and a single
-exposure “penalty” are enough to bring the average dephasing into a tight
-window and keep it there.
+By contrast, the **firmware-nudge phase sliding** implemented in
+``uvc_stereo_phase_sync.py`` has proven reliable on every rig tested so far.
+Once both streams are running, the helper keeps both cameras at their nominal
+exposure, estimates the inter-camera phase with an EWMA filter, and applies a
+bounded number of heavy nudges (redundant ``SET_CUR`` toggles) to the leading
+camera until the filtered offset falls inside the requested deadband.
+Calibration therefore completes without resorting to long “penalty exposures”
+and the streams return immediately to the nominal settings.
 
 .. warning::
 
@@ -311,33 +314,33 @@ At startup, the script:
 2. Disables auto exposure on each device (``Auto Exposure Mode`` set to Manual,
    and ``Exposure Auto Priority`` disabled when available).
 3. Applies a **nominal exposure** to both sensors via ``--nominal-exposure-ms``.
-4. Streams both cameras at the requested mode and collects
+4. Streams both cameras at the requested mode and collects at least
    ``--calibration-pairs`` frame pairs (for example 300 at 30 fps).
-5. Computes the average host-side delta and standard deviation over this window,
-   and logs them as::
+5. For every accepted pair it pushes the raw host delta into an EWMA:
 
-      Calibration window: avg Δ=-13.881 ms std=0.467 ms over 300 pairs (tolerance=5.000 ms)
+   .. math::
 
-6. A **single exposure “phase sliding” sequence** is always applied based on
-   the measured average offset, regardless of ``--tolerance-ms``. The tolerance
-   is used purely as an informational bound when interpreting the calibration
-   logs.
-7. During this phase:
+      \hat{\phi}_n = (1 - \alpha)\hat{\phi}_{n-1} + \alpha\,\Delta_n
 
-   * The **leading** camera (negative avg when left is ahead, positive when
-     right is ahead) receives a long ``--penalty-exposure-ms`` (greater than
-     the frame period, e.g. 40 ms at 30 fps).
-   * The **lagging** camera is set to a slightly shorter “shadow” exposure so
-     that both cameras can later be restored to the same nominal value.
-   * After ``--penalty-frames`` pairs, both cameras are restored to the nominal
-     exposure in a single "barrier" step.
+   where ``Δ_n`` is the host timestamp delta and ``α = --phase-filter-alpha``.
+   The filtered phase feeds a proportional controller that requests up to
+   ``--max-bursts-per-cycle`` heavy nudges whenever ``|φ̂|`` exceeds
+   ``--phase-deadband-ms``. Each burst is just a tight pair of
+   ``SET_CUR`` calls that toggles the Exposure control by
+   ``--nudge-step-units`` for ``--nudge-iterations`` cycles.
+6. Once both conditions are met—
 
-Typical logs for this sequence look like::
+   * at least ``--calibration-pairs`` observations processed (optionally
+     extended by ``--calibration-max-attempts`` windows), and
+   * ``|φ̂| <= --phase-deadband-ms``—
 
-   Calibration window: avg Δ=-13.881 ms std=0.467 ms over 300 pairs (tolerance=5.000 ms)
-   Applying single penalty exposure on left (and shadow on other) to reduce startup offset (avg Δ=-13.881 ms)
-   Calibration barrier: restored nominal exposure on both cameras (leader=left)
-   Calibration sequence completed
+   the helper computes the average and standard deviation of the accumulated
+   deltas and logs a summary::
+
+      Calibration window: avg Δ=-0.412 ms std=1.987 ms over 1000 pairs (deadband=0.300 ms)
+
+   If the average reveals an integer frame offset, the helper drops that
+   many frames from the leading buffer before entering steady state.
 
 Pairing Modes: Sync vs Measure
 -------------------------------
@@ -399,22 +402,26 @@ Device & stream selection:
 
 Exposure calibration:
 
-* ``--nominal-exposure-ms`` – target exposure used after calibration.
-* ``--penalty-exposure-ms`` – long exposure applied once on the leading camera
-  to slow it down (must exceed the frame period). When set to ``0`` the helper
-  derives a suitable penalty from the advertised frame rate and
-  ``--nominal-exposure-ms``.
+* ``--nominal-exposure-ms`` – target exposure used throughout calibration and
+  steady state.
 * ``--exposure-unit-us`` – conversion granularity (default 100 µs per unit,
   the UVC default).
-* ``--tolerance-ms`` – informational threshold used when interpreting the
-  calibration statistics (the sliding step is always applied; a large average
-  beyond this bound indicates a significant hardware offset).
-* ``--calibration-pairs`` – number of paired frames used to estimate the
-  startup offset.
-* ``--penalty-frames`` – number of pairs to skip while the penalty exposure is
-  active before restoring the nominal exposure. When set to ``0`` the helper
-  derives a penalty window from the observed offset and the effective frame
-  rate.
+* ``--calibration-pairs`` – minimum number of pairs processed during the phase
+  calibration stage.
+* ``--calibration-max-attempts`` – how many additional windows of
+  ``--calibration-pairs`` the helper will try if the filtered phase never
+  drops inside the deadband.
+* ``--phase-filter-alpha`` – EWMA coefficient for the calibration filter
+  (higher values react faster but let more noise through).
+* ``--phase-deadband-ms`` – stop criterion for the filtered phase.
+* ``--burst-effect-ms`` / ``--max-bursts-per-cycle`` – approximate effect of
+  one heavy nudge and the hard limit applied per iteration.
+* ``--post-calib-recenter`` / ``--post-calib-target-ms`` /
+  ``--post-calib-max-attempts`` / ``--post-calib-settle-frames`` – optional
+  recenter stage that keeps nudging until the filtered phase is within a tighter
+  target (default ±3 ms).
+* ``--post-calib-stop`` – exit immediately after the calibration/recenter stage
+  instead of entering steady-state streaming.
 
 Pairing strategy:
 
@@ -443,9 +450,9 @@ some frame drops), a typical command is::
        --interface 1 \
        --width 1920 --height 1080 --fps 30 \
        --codec mjpeg \
-       --nominal-exposure-ms 10.0 --penalty-exposure-ms 40.0 \
-       --tolerance-ms 5.0 --calibration-pairs 300 --penalty-frames 3 \
-       --exposure-unit-us 100 \
+       --nominal-exposure-ms 10.0 --calibration-pairs 1000 \
+       --phase-filter-alpha 0.02 --phase-deadband-ms 0.3 \
+       --burst-effect-ms 0.2 --max-bursts-per-cycle 3 \
        --sync-window-ms 15.0 --pairing-mode sync \
        --duration 20 --log-level INFO
 
@@ -459,10 +466,10 @@ downstream algorithm handle the offset), use::
        --interface 1 \
        --width 1920 --height 1080 --fps 30 \
        --codec mjpeg \
-       --nominal-exposure-ms 10.0 --penalty-exposure-ms 40.0 \
-       --tolerance-ms 5.0 --calibration-pairs 300 --penalty-frames 3 \
-       --exposure-unit-us 100 \
-       --sync-window-ms 15.0 --pairing-mode measure \
+       --nominal-exposure-ms 10.0 --calibration-pairs 1000 \
+       --phase-filter-alpha 0.02 --phase-deadband-ms 0.3 \
+       --burst-effect-ms 0.2 --max-bursts-per-cycle 3 \
+       --pairing-mode fifo \
        --duration 20 --log-level INFO
 
 In both cases the script will log the average delta and standard deviation
@@ -470,14 +477,14 @@ before and after calibration, as well as the proportion of frames dropped by
 the synchronisation logic.  This makes it straightforward to evaluate the trade
 off between preserving frames and minimising jitter for a specific stereo rig.
 
-2025 Firmware-Nudge Workflow
-----------------------------
+Filtered Firmware-Nudge Workflow
+--------------------------------
 
 Recent work on MS2130-based HDMI grabbers showed that exposure “penalty” pulses
 are unnecessary once a closed-loop “firmware nudge” controller is in place. The
-current version of ``uvc_stereo_phase_sync`` therefore relies on a lightweight
-per-camera ramp that automatically finds the minimum nudge required to flip the
-phase and then freezes it.
+current version of ``uvc_stereo_phase_sync`` therefore keeps both cameras at
+their nominal exposure and relies on an EWMA-driven proportional loop to decide
+when to issue short bursts of exposure toggles.
 
 How the controller behaves
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -489,22 +496,17 @@ How the controller behaves
   1. **Modulo guard** – if ``|Δ|`` grows beyond one frame period (derived from
      ``--fps``), the script discards a single frame from the leader so the
      queues never drift by more than one frame in either direction.
-  2. **Per-camera ramp** – each camera has its own scale (initially
-     ``--nudge-ramp-start``, default 0.02). As long as the same camera keeps
-     leading, its scale increases by ``--nudge-ramp-step`` up to
-     ``--nudge-ramp-max``. The scale multiplies both ``--nudge-iterations`` and
-     ``--nudge-gain`` so a small number such as 0.08 still produces a visible
-     delay without overwhelming the firmware.
-  3. **Lock & decay** – once ``|Δ|`` flips sign or drops below
-     ``--nudge-ramp-lock`` (default 2 ms), the current leader is “locked”:
-     its scale is reset to the start value and will not increase again until
-     the other camera forces a sign change. The opposite side is “unlocked” and
-     its scale decays by ``--nudge-ramp-decay`` (default 0.5) so the next nudge
-     starts weaker.
-
-* After calibration the nudges stop completely. The script never touches
-  exposure again; it simply reports the hardware offset while pairing frames
-  FIFO.
+  2. **Filtered control** – each accepted pair updates the EWMA ``φ̂`` with
+     ``--phase-filter-alpha``. When ``|φ̂|`` exceeds
+     ``--phase-deadband-ms`` the helper asks the phase controller for a bounded
+     number of heavy nudges (up to ``--max-bursts-per-cycle``) and applies them
+     to the leading camera. Each burst simply toggles the Exposure control up
+     by ``--nudge-step-units`` for ``--nudge-iterations`` cycles before
+     returning to the nominal value.
+* After calibration (and any optional post-calibration recenter requested via
+  ``--post-calib-recenter``) the nudges stop completely. The script never
+  touches exposure again; it simply reports the hardware offset while pairing
+  frames according to the selected mode.
 
 Default CLI (no tuning required)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -523,22 +525,49 @@ symmetrical configuration that works well on MS2130 grabbers:
        --fps 30 \
        --codec mjpeg \
        --nominal-exposure-ms 2.0 \
-       --tolerance-ms 4.0 \
-       --calibration-pairs 100 \
+       --calibration-pairs 1000 \
+       --phase-filter-alpha 0.02 --phase-deadband-ms 0.3 \
        --print-deltas \
        --log-level INFO
 
-Only override the nudge parameters when this baseline does not converge:
+Only override the core nudge parameters when this baseline does not converge:
 
 * ``--nudge-iterations`` / ``--nudge-step-units`` – increase slightly if the
   cameras never flip sign, decrease if you notice large overshoots.
-* ``--nudge-ramp-step`` / ``--nudge-ramp-max`` – reduce for gentler ramps, or
-  bump them if the controller is too slow to react.
-* ``--nudge-ramp-lock`` – tighten when you want the ramp to freeze as soon as
-  Δ is within a narrow tolerance; loosen when your sensors need more headroom.
+* ``--phase-filter-alpha`` / ``--phase-deadband-ms`` – tweak the calibration
+  filter bandwidth and deadband when you need faster convergence (higher alpha)
+  or extra stability (larger deadband).
+* ``--calibration-max-attempts`` – cap the total calibration time (default 3
+  windows of ``--calibration-pairs`` each).
 
 In typical runs the controller only sends a few dozen ``SET_CUR`` bursts per
 camera during the first second of capture, after which both streams free-run
 with the nominal exposure. This makes the workflow far more repeatable than the
 older “penalty exposure” approach while keeping the CLI simple (device
 selection + optional ``--print-deltas``).
+
+Optional Post-Calibration Recentering
+-------------------------------------
+
+Some rigs converge inside ``--phase-deadband-ms`` yet still show a residual
+offset of 5–15 ms once the calibration window ends. Rather than tightening the
+main deadband (which increases calibration time for everyone), you can request
+a short **recenter** stage:
+
+* ``--post-calib-recenter`` enables it.
+* ``--post-calib-target-ms`` defines the tighter tolerance (default ±3 ms).
+* ``--post-calib-max-attempts`` bounds how many burst rounds are allowed.
+* ``--post-calib-settle-frames`` controls how many paired frames to wait after
+  each burst so the EWMA can reflect the change.
+
+As soon as the standard calibration criteria are met (and drift learning, if
+enabled, has finished), the helper compares ``|φ̂|`` against the tighter target.
+If the phase is still outside the band it immediately applies a small burst
+(using the learned ``k`` when available, otherwise single-step nudges), waits
+for ``--post-calib-settle-frames`` frames, and checks again. The stage ends as
+soon as the tighter target is satisfied, or after the attempt budget is
+exhausted (in which case a warning is logged and the script continues with the
+remaining offset).
+
+Combine this flag with ``--post-calib-stop`` when you only need the calibration
+report and prefer to terminate immediately after the recentring pass.

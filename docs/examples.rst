@@ -179,17 +179,18 @@ persisting timing or compressed payloads.
 
 Implements the closed-loop “firmware nudge” strategy described in
 :doc:`stereo_sync`.  After disabling auto exposure on both cameras and aligning
-their FIFO buffers, the helper continuously measures the timestamp delta and, if it
-exceeds ``--tolerance-ms``, overloads the leading camera’s control bus with a burst
-of redundant ``SET_CUR`` requests (see ``--nudge-iterations`` /
-``--nudge-step-units``).  The per-camera ramp (``--nudge-ramp-*``) keeps those
-nudges symmetrical and automatically backs off once the hardware settles.  Pairing
-modes (``sync``, ``soft-sync``, ``fifo``, ``monitor``) determine whether frames are
+their FIFO buffers, the helper filters the timestamp delta with an EWMA
+(``--phase-filter-alpha``) and only applies bounded heavy nudges while the
+filtered phase lies outside ``--phase-deadband-ms``.  Pairing modes
+(``sync``, ``soft-sync``, ``fifo``, ``monitor``) determine whether frames are
 dropped to minimise jitter or preserved to expose the physical offset.  Start with
 the defaults—``--pairing-mode sync`` and ``--nominal-exposure-ms`` appropriate for
 your sensor—and enable ``--print-deltas`` plus ``--duration`` to capture reproducible
-timing runs.  When fine-grained guidance is needed (e.g., tuning ``--nudge-gain`` or
-``--monitor-window-ms``), refer back to :doc:`stereo_sync`.
+timing runs.  When fine-grained guidance is needed (e.g., tuning
+``--phase-filter-alpha`` / ``--phase-deadband-ms`` or enabling drift correction),
+refer back to :doc:`stereo_sync`.  Add ``--post-calib-recenter`` when you need the
+calibration to finish with an explicit recenter pass, and combine it with
+``--post-calib-stop`` if you only care about the calibration statistics.
 
 Integrating Scripts
 -------------------
