@@ -59,12 +59,17 @@ any other helper without memorising script-specific flag names.
   a rig’s behaviour before applying any corrective action. See `docs/stereo_sync.rst`
   for background and tuning tips.
 - `uvc_stereo_phase_sync.py` — Closed-loop “firmware nudge” controller that disables auto
-  exposure, aligns buffers, then issues bursts of redundant `SET_CUR` exposure calls on
-  the leading camera whenever `|Δ|` exceeds `--tolerance-ms`. Supports pairing modes
-  (`sync`, `soft-sync`, `fifo`, `monitor`), per-camera ramp parameters
-  (`--nudge-ramp-*`), and the integral gain/limit settings (`--nudge-gain`,
-  `--nudge-max-per-cycle`) documented in detail inside `docs/stereo_sync.rst`. Use
-  `--print-deltas` plus `--duration` to capture reproducible timing runs.
+  exposure, aligns buffers, then uses a filtered phase estimate to drive bounded
+  exposure toggles on the leading camera during calibration. Supports pairing modes
+  (`sync`, `soft-sync`, `fifo`, `monitor`), EWMA tuning (`--phase-filter-alpha`,
+  `--phase-deadband-ms`), and buffer-alignment logic described in `docs/stereo_sync.rst`.
+  Use `--print-deltas` plus `--duration` to capture reproducible timing runs. The optional
+  steady-state drift corrector (`--enable-drift-correction`) learns the per-burst phase
+  response during calibration (`--drift-learn-steps`, `--drift-min-confidence`) and applies
+  additional nudges only when the filtered phase drifts beyond `--drift-deadband-ms`.
+  Supply `--post-calib-recenter` when you want a short recenter pass that keeps nudging
+  until the EWMA sits within `--post-calib-target-ms`, and add `--post-calib-stop` if you
+  want the helper to exit immediately after that calibration pass.
 
 ## Still-Image Capture
 

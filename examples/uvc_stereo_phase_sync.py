@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """Stereo phase synchronisation via firmware nudges.
 
-This helper opens two identical UVC cameras, forces manual exposure on both
-and pairs frames using timestamp-aware queues. Whenever the timestamp delta
-exceeds a tolerance window, the leading camera is "nudged" by rapidly sending
-redundant SET_CUR requests for the Exposure control (toggle nominal and
-nominal+Δ). The firmware must service these I2C transactions synchronously,
-which creates a small delay that helps bring both streams back into phase.
+This helper opens two identical UVC cameras, forces manual exposure on both,
+and pairs frames using timestamp-aware queues. During the calibration phase it
+continuously estimates the inter-camera phase via a filtered host timestamp
+delta and momentarily "nudges" the leading camera by spamming redundant
+``SET_CUR`` requests on the Exposure control. These synchronous I2C transactions
+stall the firmware just enough to align both capture pipelines. Once the phase
+estimate stabilises within the requested deadband, calibration stops and the
+stream runs open-loop with no further nudges.
 """
 
 from __future__ import annotations
@@ -278,6 +280,77 @@ def heavy_nudge(
     return True
 
 
+class PhaseEstimator:
+    """EWMA-based estimator for the inter-camera phase."""
+
+    def __init__(self, alpha: float):
+        self.alpha = alpha
+        self.initialised = False
+        self.phi_hat_ms = 0.0
+
+    def update(self, delta_ms: float) -> float:
+        if not self.initialised:
+            self.phi_hat_ms = delta_ms
+            self.initialised = True
+        else:
+            self.phi_hat_ms = (1.0 - self.alpha) * self.phi_hat_ms + self.alpha * delta_ms
+        return self.phi_hat_ms
+
+
+class PhaseController:
+    """Map a filtered phase estimate to a bounded number of heavy nudges."""
+
+    def __init__(
+        self,
+        *,
+        deadband_ms: float,
+        phase_gain: float,
+        burst_effect_ms: float,
+        max_bursts: int,
+    ):
+        self.deadband_ms = deadband_ms
+        self.phase_gain = phase_gain
+        self.burst_effect_ms = max(burst_effect_ms, 1e-6)
+        self.max_bursts = max(1, max_bursts)
+
+    def compute_bursts(self, phi_hat_ms: float) -> int:
+        if abs(phi_hat_ms) < self.deadband_ms:
+            return 0
+        raw = self.phase_gain * (phi_hat_ms / self.burst_effect_ms)
+        bursts = int(round(raw))
+        if bursts > 0:
+            return min(bursts, self.max_bursts)
+        if bursts < 0:
+            return max(bursts, -self.max_bursts)
+        return 0
+
+
+def _fit_drift_model(samples: List[Tuple[float, int]]) -> Tuple[Optional[float], float]:
+    """Return (k, r2) for Δphi ≈ k * Δu based on collected samples."""
+
+    if not samples:
+        return None, 0.0
+
+    num = sum(delta_phi * delta_u for delta_phi, delta_u in samples)
+    den = sum(delta_u * delta_u for _, delta_u in samples)
+    if den == 0:
+        return None, 0.0
+
+    k = num / den
+    mean = sum(delta_phi for delta_phi, _ in samples) / len(samples)
+    ss_tot = sum((delta_phi - mean) ** 2 for delta_phi, _ in samples)
+    ss_res = sum((delta_phi - k * delta_u) ** 2 for delta_phi, delta_u in samples)
+    if ss_tot <= 0.0:
+        r2 = 0.0
+    else:
+        r2 = max(0.0, 1.0 - (ss_res / ss_tot))
+    return k, r2
+
+
+DRIFT_LEARNING_WAIT_FRAMES = 30
+MAX_DRIFT_BURSTS = 3
+
+
 def frame_producer(
     camera: UVCCamera,
     frame_queue: queue.Queue,
@@ -384,12 +457,6 @@ def _parse_args() -> argparse.Namespace:
 
     # Phase-sliding parameters
     parser.add_argument(
-        "--tolerance-ms",
-        type=float,
-        default=3.0,
-        help="Allowed timestamp delta before triggering a heavy nudge (ms)",
-    )
-    parser.add_argument(
         "--nominal-exposure-ms",
         type=float,
         default=10.0,
@@ -414,52 +481,103 @@ def _parse_args() -> argparse.Namespace:
         help="Minimum exposure control units to add during a nudge (clamped to device step size)",
     )
     parser.add_argument(
-        "--nudge-gain",
-        type=float,
-        default=0.2,
-        help="Heavy nudges issued per millisecond of phase error beyond tolerance (0 disables the closed-loop accumulator)",
-    )
-    parser.add_argument(
-        "--nudge-max-per-cycle",
-        type=int,
-        default=2,
-        help="Hard limit on heavy nudges issued during a single control cycle",
-    )
-    parser.add_argument(
-        "--nudge-ramp-max",
-        type=float,
-        default=0.1,
-        help="Maximum ramp scaling factor allowed during calibration",
-    )
-    parser.add_argument(
-        "--nudge-ramp-start",
-        type=float,
-        default=0.02,
-        help="Initial scaling factor for nudge gain/iterations during calibration (0-1)",
-    )
-    parser.add_argument(
-        "--nudge-ramp-step",
-        type=float,
-        default=0.01,
-        help="Increment applied to the ramp scaling factor up to --nudge-ramp-max",
-    )
-    parser.add_argument(
-        "--nudge-ramp-lock",
-        type=float,
-        default=2.0,
-        help="|Δ| below this threshold (ms) stops further ramping on the current leader",
-    )
-    parser.add_argument(
-        "--nudge-ramp-decay",
-        type=float,
-        default=0.5,
-        help="Multiplier applied to the previous leader's ramp after a sign change (0-1)",
-    )
-    parser.add_argument(
         "--calibration-pairs",
         type=int,
-        default=50,
-        help="Number of initial frame pairs used to estimate startup offset (buffer alignment happens at most once in this window)",
+        default=1000,
+        help="Minimum number of pairs processed during the phase calibration stage",
+    )
+    parser.add_argument(
+        "--calibration-max-attempts",
+        type=int,
+        default=3,
+        help="Maximum number of successive calibration windows before forcing steady state",
+    )
+    parser.add_argument(
+        "--phase-filter-alpha",
+        type=float,
+        default=0.02,
+        help="EWMA coefficient used to smooth delta_ms during calibration (0-1)",
+    )
+    parser.add_argument(
+        "--phase-deadband-ms",
+        type=float,
+        default=0.3,
+        help="Deadband applied to the filtered phase estimate during calibration",
+    )
+    parser.add_argument(
+        "--burst-effect-ms",
+        type=float,
+        default=0.2,
+        help="Estimated delay produced by a single heavy nudge burst (ms)",
+    )
+    parser.add_argument(
+        "--max-bursts-per-cycle",
+        type=int,
+        default=3,
+        help="Maximum number of heavy nudge bursts per calibration iteration",
+    )
+    parser.add_argument(
+        "--enable-drift-correction",
+        action="store_true",
+        help="Enable slow drift correction during steady-state streaming",
+    )
+    parser.add_argument(
+        "--drift-deadband-ms",
+        type=float,
+        default=0.5,
+        help="Deadband applied to the filtered phase during steady-state drift correction",
+    )
+    parser.add_argument(
+        "--drift-check-interval",
+        type=int,
+        default=200,
+        help="Number of paired frames between drift correction attempts",
+    )
+    parser.add_argument(
+        "--drift-filter-alpha",
+        type=float,
+        default=0.02,
+        help="EWMA coefficient for phase filtering in steady state (0-1)",
+    )
+    parser.add_argument(
+        "--drift-learn-steps",
+        type=int,
+        default=6,
+        help="Number of bursts applied during calibration to learn drift response",
+    )
+    parser.add_argument(
+        "--drift-min-confidence",
+        type=float,
+        default=0.7,
+        help="Minimum R^2 required for the drift response model to be considered valid",
+    )
+    parser.add_argument(
+        "--post-calib-recenter",
+        action="store_true",
+        help="After calibration, apply extra nudges until the filtered phase is within post-calib-target-ms",
+    )
+    parser.add_argument(
+        "--post-calib-target-ms",
+        type=float,
+        default=3.0,
+        help="Target absolute phase (ms) for the optional post-calibration recenter stage",
+    )
+    parser.add_argument(
+        "--post-calib-max-attempts",
+        type=int,
+        default=3,
+        help="Maximum number of burst rounds attempted during post-calibration recenter",
+    )
+    parser.add_argument(
+        "--post-calib-settle-frames",
+        type=int,
+        default=60,
+        help="Frames to wait after each post-calibration burst before checking the phase again",
+    )
+    parser.add_argument(
+        "--post-calib-stop",
+        action="store_true",
+        help="Stop the helper immediately after calibration/post-calibration recenter completes",
     )
     parser.add_argument(
         "--duration",
@@ -503,22 +621,34 @@ def _parse_args() -> argparse.Namespace:
         parser.error("--nudge-iterations must be positive")
     if args.nudge_step_units <= 0:
         parser.error("--nudge-step-units must be positive")
-    if args.nudge_gain < 0.0:
-        parser.error("--nudge-gain must be non-negative")
-    if args.nudge_max_per_cycle <= 0:
-        parser.error("--nudge-max-per-cycle must be positive")
     if args.pairing_mode == "monitor" and args.monitor_window_ms <= 0.0:
         parser.error("--monitor-window-ms must be positive in monitor mode")
-    if not 0.0 <= args.nudge_ramp_max <= 1.0:
-        parser.error("--nudge-ramp-max must be between 0 and 1")
-    if args.nudge_ramp_start < 0.0 or args.nudge_ramp_start > 1.0:
-        parser.error("--nudge-ramp-start must be between 0 and 1")
-    if args.nudge_ramp_step < 0.0:
-        parser.error("--nudge-ramp-step must be non-negative")
-    if not 0.0 <= args.nudge_ramp_decay <= 1.0:
-        parser.error("--nudge-ramp-decay must be between 0 and 1")
-    if args.nudge_ramp_lock < 0.0:
-        parser.error("--nudge-ramp-lock must be non-negative")
+    if args.calibration_max_attempts <= 0:
+        parser.error("--calibration-max-attempts must be positive")
+    if args.phase_deadband_ms < 0.0:
+        parser.error("--phase-deadband-ms must be non-negative")
+    if args.burst_effect_ms <= 0.0:
+        parser.error("--burst-effect-ms must be positive")
+    if args.max_bursts_per_cycle <= 0:
+        parser.error("--max-bursts-per-cycle must be positive")
+    if not 0.0 < args.phase_filter_alpha <= 1.0:
+        parser.error("--phase-filter-alpha must be in (0, 1]")
+    if not 0.0 < args.drift_filter_alpha <= 1.0:
+        parser.error("--drift-filter-alpha must be in (0, 1]")
+    if args.drift_deadband_ms < 0.0:
+        parser.error("--drift-deadband-ms must be non-negative")
+    if args.drift_check_interval <= 0:
+        parser.error("--drift-check-interval must be positive")
+    if args.drift_learn_steps <= 0:
+        parser.error("--drift-learn-steps must be positive")
+    if not 0.0 <= args.drift_min_confidence <= 1.0:
+        parser.error("--drift-min-confidence must be between 0 and 1")
+    if args.post_calib_target_ms < 0.0:
+        parser.error("--post-calib-target-ms must be non-negative")
+    if args.post_calib_max_attempts <= 0:
+        parser.error("--post-calib-max-attempts must be positive")
+    if args.post_calib_settle_frames < 0:
+        parser.error("--post-calib-settle-frames must be zero or positive")
 
     logging.basicConfig(level=args.log_level.upper())
 
@@ -608,7 +738,27 @@ def main() -> int:
     calibration_pairs = max(0, args.calibration_pairs)
     calibration_deltas: list[float] = []
     calibration_done = calibration_pairs == 0
-    post_stats_enabled = False
+    calibration_count = 0
+    calibration_target = calibration_pairs
+    calibration_attempt = 1
+    phase_estimator = PhaseEstimator(args.phase_filter_alpha)
+    phase_controller = PhaseController(
+        deadband_ms=args.phase_deadband_ms,
+        phase_gain=1.0,
+        burst_effect_ms=args.burst_effect_ms,
+        max_bursts=args.max_bursts_per_cycle,
+    )
+    drift_phase_estimator = PhaseEstimator(args.drift_filter_alpha)
+    steady_frame_counter = 0
+    drift_learning_active = args.enable_drift_correction and args.drift_learn_steps > 0
+    drift_learning_remaining = args.drift_learn_steps if drift_learning_active else 0
+    drift_learning_wait = 0
+    drift_learning_phi_before: Optional[float] = None
+    drift_learning_cmd: Optional[int] = None
+    drift_learning_samples: List[Tuple[float, int]] = []
+    drift_model_valid = False
+    drift_burst_gain: Optional[float] = None
+    post_stats_enabled = calibration_done
     post_pairs = 0
     post_sum_delta_ms = 0.0
     post_sum_sq_delta_ms = 0.0
@@ -628,22 +778,14 @@ def main() -> int:
     sync_drops_right = 0
     nudges_applied = 0
     nudge_events = 0
-    nudge_integral_left = 0.0
-    nudge_integral_right = 0.0
+    total_bursts_left = 0
+    total_bursts_right = 0
     monitor_alignment_done = not pairing_monitor
-    ramp_max = min(1.0, max(0.0, args.nudge_ramp_max))
-    ramp_start = min(ramp_max, max(0.0, args.nudge_ramp_start))
-    scale_map = {
-        "left": ramp_start,
-        "right": ramp_start,
-    }
-    leader_locked = {
-        "left": False,
-        "right": False,
-    }
-    prev_leader_label: Optional[str] = None
-    prev_delta_sign: Optional[int] = None
-    nudging_active = not calibration_done
+    post_recenter_enabled = args.post_calib_recenter
+    post_recenter_done = not post_recenter_enabled
+    post_recenter_started = False
+    post_recenter_attempts = 0
+    post_recenter_wait = 0
 
     # Buffer-level phase correction: after calibration, when an integer frame
     # offset is detected, we drop a small number of frames from the leading
@@ -733,7 +875,6 @@ def main() -> int:
                 )
                 # After buffer shift, start counting post-calibration stats.
                 post_stats_enabled = True
-                nudging_active = False
 
             # Pairing strategy:
             #
@@ -939,253 +1080,394 @@ def main() -> int:
             global_sum_sq_delta_ms += delta_ms * delta_ms
 
             if not calibration_done:
-                current_leader_label: Optional[str] = None
-                if delta_ms < 0.0:
-                    current_leader_label = "left"
-                elif delta_ms > 0.0:
-                    current_leader_label = "right"
-
-                sign = 0
-                if delta_ms > 0.0:
-                    sign = 1
-                elif delta_ms < 0.0:
-                    sign = -1
-                if sign != 0 and prev_delta_sign is not None and sign != prev_delta_sign:
-                    LOG.info("Calibration sign change detected; locking ramp direction")
-                    if prev_leader_label and prev_leader_label in scale_map:
-                        leader_locked[prev_leader_label] = True
-                        scale_map[prev_leader_label] = max(
-                            ramp_start,
-                            scale_map[prev_leader_label] * args.nudge_ramp_decay,
-                        )
-                    if current_leader_label:
-                        leader_locked[current_leader_label] = False
-                        scale_map[current_leader_label] = ramp_start
-                if sign != 0:
-                    prev_delta_sign = sign
-
-                if (
-                    current_leader_label
-                    and prev_leader_label is not None
-                    and current_leader_label != prev_leader_label
-                ):
-                    leader_locked[prev_leader_label] = True
-                    scale_map[prev_leader_label] = max(
-                        ramp_start,
-                        scale_map[prev_leader_label] * args.nudge_ramp_decay,
-                    )
-                    leader_locked[current_leader_label] = False
-                if current_leader_label:
-                    prev_leader_label = current_leader_label
-
-                if (
-                    current_leader_label
-                    and abs(delta_ms) <= args.nudge_ramp_lock
-                ):
-                    leader_locked[current_leader_label] = True
-                    scale_map[current_leader_label] = max(
-                        ramp_start,
-                        scale_map[current_leader_label] * args.nudge_ramp_decay,
-                    )
-
-                if (
-                    nudging_active
-                    and current_leader_label is not None
-                    and current_leader_label in scale_map
-                    and not leader_locked.get(current_leader_label, False)
-                    and args.nudge_ramp_step > 0.0
-                ):
-                    new_scale = min(
-                        ramp_max,
-                        scale_map[current_leader_label] + args.nudge_ramp_step,
-                    )
-                    if new_scale > scale_map[current_leader_label]:
-                        scale_map[current_leader_label] = new_scale
-                        LOG.info(
-                            "Increasing nudge ramp factor for %s to %.2f",
-                            current_leader_label,
-                            new_scale,
-                        )
-
-            # Closed-loop controller: overload the leading camera's VC bus when
-            # the phase error exceeds the desired tolerance. Depending on
-            # --nudge-gain we may batch several heavy nudges in one iteration.
-            if nudging_active:
-                error_ms = abs(delta_ms) - args.tolerance_ms
-                if error_ms > 0.0:
-                    leader_label = "left" if delta_ms < 0 else "right"
+                calibration_count += 1
+                calibration_deltas.append(delta_ms)
+                phi_hat_ms = phase_estimator.update(delta_ms)
+                bursts = phase_controller.compute_bursts(phi_hat_ms)
+                if bursts != 0:
+                    leader_label = "left" if phi_hat_ms > 0.0 else "right"
                     leader_cam = left_cam if leader_label == "left" else right_cam
                     leader_cfg = left_exposure if leader_label == "left" else right_exposure
-
-                    accumulator = (
-                        nudge_integral_left if leader_label == "left" else nudge_integral_right
-                    )
-                    bursts = 1
-                    leader_scale = scale_map.get(leader_label, args.nudge_ramp_start)
-                    effective_scale = max(0.0, min(1.0, leader_scale))
-                    effective_gain = args.nudge_gain * effective_scale
-                    if effective_scale <= 0.0 and effective_gain <= 0.0:
-                        continue
-                    effective_iterations = args.nudge_iterations
-                    if effective_iterations > 0:
-                        effective_iterations = max(
-                            1,
-                            int(math.ceil(effective_iterations * max(effective_scale, 0.01))),
-                        )
-
-                    if effective_gain > 0.0:
-                        accumulator += error_ms * effective_gain
-                        bursts = int(accumulator)
-                        if bursts <= 0:
-                            bursts = 1
-                        bursts = min(bursts, args.nudge_max_per_cycle)
-
                     applied = 0
-                    for _ in range(bursts):
+                    for _ in range(abs(bursts)):
                         if heavy_nudge(
                             leader_cam,
                             leader_cfg,
-                            iterations=effective_iterations,
+                            iterations=args.nudge_iterations,
                             step_units=args.nudge_step_units,
                             label=leader_label,
                         ):
                             applied += 1
                         else:
                             break
-
                     if applied > 0:
                         nudges_applied += applied
                         nudge_events += 1
-                        if args.nudge_gain > 0.0:
-                            accumulator = max(0.0, accumulator - applied)
-                            if leader_label == "left":
-                                nudge_integral_left = accumulator
-                            else:
-                                nudge_integral_right = accumulator
-                        if (
-                            not calibration_done
-                            and leader_label in scale_map
-                            and not leader_locked.get(leader_label, False)
-                        ):
-                            scale_map[leader_label] = min(
-                                ramp_max,
-                                scale_map[leader_label] + args.nudge_ramp_step,
-                            )
+                        if leader_label == "left":
+                            total_bursts_left += applied
+                        else:
+                            total_bursts_right += applied
                         LOG.debug(
-                            "Δ=%+.3f ms beyond tolerance %.3f ms; nudged %s camera x%d (error=%.3f ms, eff_gain=%.3f, eff_iter=%d, accumulator=%.3f)",
-                            delta_ms,
-                            args.tolerance_ms,
+                            "Calibration nudge: phi_hat=%+.3f ms bursts=%+d leader=%s applied=%d",
+                            phi_hat_ms,
+                            bursts,
                             leader_label,
                             applied,
-                            error_ms,
-                            effective_gain,
-                            effective_iterations,
-                            accumulator,
                         )
 
-            # Calibration phase: collect an initial window of deltas and, once
-            # enough pairs have been gathered, derive an integer frame offset
-            # between the two streams. We then adjust the buffers by dropping
-            # whole frames on the leading side so that steady-state pairing
-            # starts from a near-zero phase baseline.
-            if not calibration_done:
-                calibration_deltas.append(delta_ms)
-                if len(calibration_deltas) < calibration_pairs:
-                    continue
-
-                n_calib = len(calibration_deltas)
-                avg = sum(calibration_deltas) / n_calib
-                if n_calib > 1:
-                    var = sum((d - avg) ** 2 for d in calibration_deltas) / (n_calib - 1)
-                    std = math.sqrt(var)
-                else:
-                    std = 0.0
-                LOG.info(
-                    "Calibration window: avg Δ=%.3f ms std=%.3f ms over %d pairs (tolerance=%.3f ms)",
-                    avg,
-                    std,
-                    n_calib,
-                    args.tolerance_ms,
+                calibration_ready = (
+                    calibration_target > 0
+                    and calibration_count >= calibration_target
+                    and abs(phi_hat_ms) <= args.phase_deadband_ms
                 )
 
-                # Decide which camera is ahead based on the average offset.
-                leader = "left" if avg < 0 else "right"
-                effective_fps = getattr(args, "effective_fps", None)
-                frame_period_ms: Optional[float] = None
-                if effective_fps and effective_fps > 0.0:
-                    frame_period_ms = 1000.0 / effective_fps
-
-                frames_offset = 0
-                if frame_period_ms:
-                    frames_offset = int(round(avg / frame_period_ms))
-
-                if frames_offset != 0 and frame_period_ms:
-                    frames_to_drop = abs(frames_offset)
-                    # Guard against extreme offsets; these usually indicate a
-                    # deeper transport issue rather than a simple phase error.
-                    max_shift = 10
-                    if frames_to_drop > max_shift:
+                if (
+                    calibration_target > 0
+                    and calibration_count >= calibration_target
+                    and abs(phi_hat_ms) > args.phase_deadband_ms
+                ):
+                    if calibration_attempt < args.calibration_max_attempts:
+                        calibration_attempt += 1
+                        calibration_target += args.calibration_pairs
                         LOG.warning(
-                            "Computed frame offset %d exceeds safety limit (%d); "
-                            "clamping to %d",
-                            frames_to_drop,
-                            max_shift,
-                            max_shift,
+                            "Calibration deadband not reached (phi_hat=%.3f ms); extending window to %d pairs (attempt %d/%d)",
+                            phi_hat_ms,
+                            calibration_target,
+                            calibration_attempt,
+                            args.calibration_max_attempts,
                         )
-                        frames_to_drop = max_shift
-                    buffer_shift_leader = leader
-                    buffer_shift_remaining = frames_to_drop
-                    buffer_shift_total = frames_to_drop
-                    LOG.info(
-                        "Calibration suggests %d-frame offset (avg Δ=%.3f ms, frame_period=%.3f ms); "
-                        "will drop %d frame(s) from %s buffer before steady-state pairing",
-                        frames_offset,
-                        avg,
-                        frame_period_ms,
-                        buffer_shift_total,
-                        buffer_shift_leader,
-                    )
-                else:
-                    if frame_period_ms is not None:
-                        frame_period_desc = f"{frame_period_ms:.3f} ms"
                     else:
-                        frame_period_desc = "unknown"
-                    LOG.info(
-                        "Calibration found no integer frame offset from avg Δ=%.3f ms "
-                        "(frame_period=%s); keeping buffers aligned as-is",
-                        avg,
-                        frame_period_desc,
-                    )
-
-                calibration_done = True
-
-                if buffer_shift_total == 0:
-                    # No buffer shift needed; start post-calibration stats immediately.
-                    post_stats_enabled = True
-                    nudging_active = False
-                    LOG.info(
-                        "Calibration phase completed (no buffer shift); "
-                        "entering steady-state pairing (mode=%s)",
-                        args.pairing_mode,
-                    )
-                    if pairing_monitor:
-                        LOG.info(
-                            "Monitor mode: frame drops disabled after calibration; pairing FIFO on every frame"
+                        LOG.warning(
+                            "Calibration deadband not reached after %d attempts; proceeding with current estimate",
+                            args.calibration_max_attempts,
                         )
-                else:
-                    LOG.info(
-                        "Calibration phase completed; pending buffer shift of %d frame(s) on %s "
-                        "before entering steady-state pairing (mode=%s)",
-                        buffer_shift_total,
-                        buffer_shift_leader,
-                        args.pairing_mode,
-                    )
-                nudging_active = False
-                continue
+                        calibration_ready = True
 
-            # After calibration is complete we keep running the nudge
-            # controller, but steady-state statistics only start once the
-            # buffer-alignment barrier has been lifted.
+                if args.enable_drift_correction and drift_learning_active:
+                    if drift_learning_wait > 0:
+                        drift_learning_wait -= 1
+                        if (
+                            drift_learning_wait == 0
+                            and drift_learning_phi_before is not None
+                            and drift_learning_cmd is not None
+                        ):
+                            delta_phi = phase_estimator.phi_hat_ms - drift_learning_phi_before
+                            drift_learning_samples.append((delta_phi, drift_learning_cmd))
+                            LOG.debug(
+                                "Drift learning sample: Δphi=%.6f ms, Δu=%+d (samples=%d)",
+                                delta_phi,
+                                drift_learning_cmd,
+                                len(drift_learning_samples),
+                            )
+                            drift_learning_phi_before = None
+                            drift_learning_cmd = None
+                            if drift_learning_remaining == 0 and len(drift_learning_samples) >= 2:
+                                k, r2 = _fit_drift_model(drift_learning_samples)
+                                if k is not None and abs(k) > 1e-6 and r2 >= args.drift_min_confidence:
+                                    drift_model_valid = True
+                                    drift_burst_gain = k
+                                    LOG.info(
+                                        "Drift model learned: k=%.6f ms/burst (R^2=%.3f)",
+                                        k,
+                                        r2,
+                                    )
+                                else:
+                                    LOG.warning(
+                                        "Drift model learning failed (k=%s r2=%.3f); drift correction disabled",
+                                        f"{k:.6f}" if k is not None else "None",
+                                        r2,
+                                    )
+                                    drift_model_valid = False
+                                    drift_burst_gain = None
+                                drift_learning_active = False
+                    elif calibration_ready and drift_learning_remaining > 0:
+                        sample_leader_label = "left" if phi_hat_ms >= 0.0 else "right"
+                        leader_cam = left_cam if sample_leader_label == "left" else right_cam
+                        leader_cfg = left_exposure if sample_leader_label == "left" else right_exposure
+                        if heavy_nudge(
+                            leader_cam,
+                            leader_cfg,
+                            iterations=args.nudge_iterations,
+                            step_units=args.nudge_step_units,
+                            label=sample_leader_label,
+                        ):
+                            delta_u = 1 if sample_leader_label == "left" else -1
+                            drift_learning_phi_before = phase_estimator.phi_hat_ms
+                            drift_learning_cmd = delta_u
+                            drift_learning_wait = DRIFT_LEARNING_WAIT_FRAMES
+                            drift_learning_remaining -= 1
+                            nudges_applied += 1
+                            nudge_events += 1
+                            if delta_u > 0:
+                                total_bursts_left += 1
+                            else:
+                                total_bursts_right += 1
+                            LOG.debug(
+                                "Drift learning burst applied on %s (remaining=%d)",
+                                sample_leader_label,
+                                drift_learning_remaining,
+                            )
+                    elif (
+                        calibration_ready
+                        and drift_learning_remaining == 0
+                        and drift_learning_wait == 0
+                        and not drift_model_valid
+                    ):
+                        if len(drift_learning_samples) >= 2:
+                            k, r2 = _fit_drift_model(drift_learning_samples)
+                        else:
+                            k, r2 = (None, 0.0)
+                        if k is not None and abs(k) > 1e-6 and r2 >= args.drift_min_confidence:
+                            drift_model_valid = True
+                            drift_burst_gain = k
+                            LOG.info(
+                                "Drift model learned: k=%.6f ms/burst (R^2=%.3f)",
+                                k,
+                                r2,
+                            )
+                        else:
+                            if args.enable_drift_correction:
+                                LOG.warning(
+                                    "Drift model learning unavailable (k=%s r2=%.3f); drift correction disabled",
+                                    f"{k:.6f}" if k is not None else "None",
+                                    r2,
+                                )
+                            drift_model_valid = False
+                            drift_burst_gain = None
+                        drift_learning_active = False
+
+                if (
+                    calibration_ready
+                    and post_recenter_enabled
+                    and not post_recenter_done
+                    and (not args.enable_drift_correction or not drift_learning_active)
+                ):
+                    if not post_recenter_started:
+                        LOG.info(
+                            "Post-calibration recenter requested: phi_hat=%.3f ms target=%.3f ms",
+                            phi_hat_ms,
+                            args.post_calib_target_ms,
+                        )
+                        post_recenter_started = True
+
+                    if abs(phi_hat_ms) <= args.post_calib_target_ms:
+                        post_recenter_done = True
+                        LOG.info(
+                            "Post-calibration recenter satisfied: phi_hat=%.3f ms (target=%.3f ms)",
+                            phi_hat_ms,
+                            args.post_calib_target_ms,
+                        )
+                    elif post_recenter_wait > 0:
+                        post_recenter_wait -= 1
+                    elif post_recenter_attempts >= args.post_calib_max_attempts:
+                        LOG.warning(
+                            "Post-calibration recenter aborted after %d attempts (phi_hat=%.3f ms)",
+                            args.post_calib_max_attempts,
+                            phi_hat_ms,
+                        )
+                        post_recenter_done = True
+                    else:
+                        delta_u = 0
+                        if drift_model_valid and drift_burst_gain is not None:
+                            delta_u = int(round(-phi_hat_ms / drift_burst_gain))
+                        if delta_u == 0:
+                            delta_u = 1 if phi_hat_ms > 0.0 else -1
+                        max_recenter_bursts = max(1, args.max_bursts_per_cycle)
+                        if delta_u > 0:
+                            delta_u = min(delta_u, max_recenter_bursts)
+                        else:
+                            delta_u = max(delta_u, -max_recenter_bursts)
+                        leader_label = "left" if delta_u > 0 else "right"
+                        leader_cam = left_cam if leader_label == "left" else right_cam
+                        leader_cfg = left_exposure if leader_label == "left" else right_exposure
+                        applied = 0
+                        for _ in range(abs(delta_u)):
+                            if heavy_nudge(
+                                leader_cam,
+                                leader_cfg,
+                                iterations=args.nudge_iterations,
+                                step_units=args.nudge_step_units,
+                                label=leader_label,
+                            ):
+                                applied += 1
+                            else:
+                                break
+                        if applied > 0:
+                            signed_applied = applied if delta_u > 0 else -applied
+                            nudges_applied += applied
+                            nudge_events += 1
+                            if leader_label == "left":
+                                total_bursts_left += applied
+                            else:
+                                total_bursts_right += applied
+                            post_recenter_attempts += 1
+                            post_recenter_wait = args.post_calib_settle_frames
+                            LOG.info(
+                                "Post-calibration recenter burst: phi_hat=%+.3f ms Δu=%+d leader=%s attempt %d/%d",
+                                phi_hat_ms,
+                                signed_applied,
+                                leader_label,
+                                post_recenter_attempts,
+                                args.post_calib_max_attempts,
+                            )
+                        else:
+                            LOG.warning(
+                                "Post-calibration recenter burst failed on %s; aborting recenter stage",
+                                leader_label,
+                            )
+                            post_recenter_done = True
+
+                if (
+                    calibration_ready
+                    and (not args.enable_drift_correction or not drift_learning_active)
+                    and (post_recenter_done or not post_recenter_enabled)
+                ):
+                    n_calib = len(calibration_deltas)
+                    avg = sum(calibration_deltas) / n_calib
+                    if n_calib > 1:
+                        var = sum((d - avg) ** 2 for d in calibration_deltas) / (n_calib - 1)
+                        std = math.sqrt(var)
+                    else:
+                        std = 0.0
+                    LOG.info(
+                        "Calibration window: avg Δ=%.3f ms std=%.3f ms over %d pairs (deadband=%.3f ms)",
+                        avg,
+                        std,
+                        n_calib,
+                        args.phase_deadband_ms,
+                    )
+
+                    # Decide which camera is ahead based on the average offset.
+                    leader = "left" if avg < 0 else "right"
+                    effective_fps = getattr(args, "effective_fps", None)
+                    frame_period_ms: Optional[float] = None
+                    if effective_fps and effective_fps > 0.0:
+                        frame_period_ms = 1000.0 / effective_fps
+
+                    frames_offset = 0
+                    if frame_period_ms:
+                        frames_offset = int(round(avg / frame_period_ms))
+
+                    if frames_offset != 0 and frame_period_ms:
+                        frames_to_drop = abs(frames_offset)
+                        max_shift = 10
+                        if frames_to_drop > max_shift:
+                            LOG.warning(
+                                "Computed frame offset %d exceeds safety limit (%d); "
+                                "clamping to %d",
+                                frames_to_drop,
+                                max_shift,
+                                max_shift,
+                            )
+                            frames_to_drop = max_shift
+                        buffer_shift_leader = leader
+                        buffer_shift_remaining = frames_to_drop
+                        buffer_shift_total = frames_to_drop
+                        LOG.info(
+                            "Calibration suggests %d-frame offset (avg Δ=%.3f ms, frame_period=%.3f ms); "
+                            "will drop %d frame(s) from %s buffer before steady-state pairing",
+                            frames_offset,
+                            avg,
+                            frame_period_ms,
+                            buffer_shift_total,
+                            buffer_shift_leader,
+                        )
+                    else:
+                        if frame_period_ms is not None:
+                            frame_period_desc = f"{frame_period_ms:.3f} ms"
+                        else:
+                            frame_period_desc = "unknown"
+                        LOG.info(
+                            "Calibration found no integer frame offset from avg Δ=%.3f ms "
+                            "(frame_period=%s); keeping buffers aligned as-is",
+                            avg,
+                            frame_period_desc,
+                        )
+
+                    calibration_done = True
+                    LOG.info(
+                        "Calibration complete: phi_hat=%.4f ms over %d pairs",
+                        phi_hat_ms,
+                        calibration_count,
+                    )
+
+                    if buffer_shift_total == 0:
+                        post_stats_enabled = True
+                        LOG.info(
+                            "Calibration phase completed (no buffer shift); "
+                            "entering steady-state pairing (mode=%s)",
+                            args.pairing_mode,
+                        )
+                        if pairing_monitor:
+                            LOG.info(
+                                "Monitor mode: frame drops disabled after calibration; pairing FIFO on every frame"
+                            )
+                    else:
+                        LOG.info(
+                            "Calibration phase completed; pending buffer shift of %d frame(s) on %s "
+                            "before entering steady-state pairing (mode=%s)",
+                            buffer_shift_total,
+                            buffer_shift_leader,
+                            args.pairing_mode,
+                        )
+                    if args.post_calib_stop:
+                        LOG.info("Post-calibration stop requested; terminating before steady-state streaming")
+                        stop_event.set()
+                        break
+                    continue
+
+            # After calibration is complete we keep running without nudges;
+            # steady-state statistics only start once the buffer-alignment
+            # barrier has been lifted.
+            if (
+                post_stats_enabled
+                and args.enable_drift_correction
+                and drift_model_valid
+                and drift_burst_gain is not None
+            ):
+                steady_frame_counter += 1
+                phi_hat_drift = drift_phase_estimator.update(delta_ms)
+                if (
+                    steady_frame_counter >= args.drift_check_interval
+                    and abs(phi_hat_drift) >= args.drift_deadband_ms
+                ):
+                    steady_frame_counter = 0
+                    delta_u = int(round(-phi_hat_drift / drift_burst_gain))
+                    max_drift_bursts = min(MAX_DRIFT_BURSTS, args.max_bursts_per_cycle)
+                    if delta_u > 0:
+                        delta_u = min(delta_u, max_drift_bursts)
+                    elif delta_u < 0:
+                        delta_u = max(delta_u, -max_drift_bursts)
+                    if delta_u != 0:
+                        leader_label = "left" if delta_u > 0 else "right"
+                        leader_cam = left_cam if leader_label == "left" else right_cam
+                        leader_cfg = left_exposure if leader_label == "left" else right_exposure
+                        applied = 0
+                        for _ in range(abs(delta_u)):
+                            if heavy_nudge(
+                                leader_cam,
+                                leader_cfg,
+                                iterations=args.nudge_iterations,
+                                step_units=args.nudge_step_units,
+                                label=leader_label,
+                            ):
+                                applied += 1
+                            else:
+                                break
+                        if applied > 0:
+                            nudges_applied += applied
+                            nudge_events += 1
+                            if leader_label == "left":
+                                total_bursts_left += applied
+                            else:
+                                total_bursts_right += applied
+                            LOG.debug(
+                                "Drift correction: phi_hat=%+.3f ms Δu=%+d leader=%s applied=%d",
+                                phi_hat_drift,
+                                delta_u,
+                                leader_label,
+                                applied,
+                            )
             if post_stats_enabled:
                 post_pairs += 1
                 post_sum_delta_ms += delta_ms
@@ -1273,7 +1555,23 @@ def main() -> int:
                 drop_ratio * 100.0,
             )
 
-        LOG.info("Heavy nudges applied: %d across %d control events", nudges_applied, nudge_events)
+        if args.enable_drift_correction:
+            if drift_model_valid and drift_burst_gain is not None:
+                LOG.info(
+                    "Drift correction model active: k=%.6f ms/burst (check interval=%d frames)",
+                    drift_burst_gain,
+                    args.drift_check_interval,
+                )
+            else:
+                LOG.info("Drift correction inactive (no valid model)")
+
+        LOG.info(
+            "Heavy nudges applied: total=%d (left=%d right=%d) across %d control events",
+            nudges_applied,
+            total_bursts_left,
+            total_bursts_right,
+            nudge_events,
+        )
 
     return 0
 
