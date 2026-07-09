@@ -509,6 +509,7 @@ class CapturedFrame:
     frame: Union[FrameInfo, StillFrameInfo]
     fid: int
     pts: Optional[int]
+    scr: Optional[Tuple[int, int, int]]
     timestamp: float = dataclasses.field(default_factory=time.time)
     sequence: int = 0
 
@@ -547,7 +548,7 @@ class FrameAssemblyResult:
     reason: str
     error: bool = False
     duration: Optional[float] = None
-
+    scr: Optional[Tuple[int, int, int]] = None
 
 @dataclasses.dataclass
 class StreamStats:
@@ -582,6 +583,7 @@ class FrameReassembler:
         self._buffer = bytearray()
         self._current_fid: Optional[int] = None
         self._current_pts: Optional[int] = None
+        self._scr: Optional[Tuple[int, int, int]] = None
         self._frame_error = False
         self._packets_seen = 0
         self._frame_started_at: Optional[float] = None
@@ -616,7 +618,13 @@ class FrameReassembler:
 
         if flags & BH_PTS and header_len >= 6:
             self._current_pts = int.from_bytes(packet[2:6], "little")
-
+        
+        if flags & BH_SCR and header_len >= 12:
+            stc  = int.from_bytes(packet[6:10], "little")   # camera clock, same domain as PTS
+            sof  = int.from_bytes(packet[10:12], "little") & 0x7FF  # 11-bit SOF counter
+            host = time.monotonic_ns()  # host clock at the moment this packet was received (ns)
+            self._scr = (stc, sof, host)            
+    
         if payload:
             self._buffer.extend(payload)
 
@@ -644,6 +652,7 @@ class FrameReassembler:
         self._frame_error = err
         self._packets_seen = 0
         self._current_pts = None
+        self._scr = None
 
     def _reset_state(self) -> None:
         self._buffer = bytearray()
@@ -652,6 +661,7 @@ class FrameReassembler:
         self._current_pts = None
         self._packets_seen = 0
         self._frame_started_at = None
+        self._scr = None
 
     def _finalize(self, reason: str) -> Optional[FrameAssemblyResult]:
         if self._current_fid is None:
@@ -676,6 +686,7 @@ class FrameReassembler:
             payload=payload,
             fid=self._current_fid,
             pts=self._current_pts,
+            scr=self._scr,
             reason=reason,
             error=error or payload is None,
             duration=duration,
@@ -3800,6 +3811,7 @@ class FrameStream:
             frame=self._frame,
             fid=result.fid if result.fid is not None else 0,
             pts=result.pts,
+            scr=result.scr,
             timestamp=time.time(),
             sequence=self._sequence,
             decoded=decoded,
